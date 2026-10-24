@@ -7,9 +7,12 @@ import uvicorn
 
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
+from fastapi import Security
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from html import escape
 
 
 # =========================================================
@@ -375,15 +378,55 @@ def list_surveys(
 
 
 # =========================================================
-# DASHBOARD WEB ADMIN
+# DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
 
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 from html import escape
+import secrets
+import os
+
+admin_security = HTTPBasic()
+
+
+def verify_admin(
+    credentials: HTTPBasicCredentials = Depends(admin_security),
+):
+    admin_username = os.environ.get("ADMIN_USERNAME", "")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    if not admin_username or not admin_password:
+        raise HTTPException(
+            status_code=503,
+            detail="Login admin belum dikonfigurasi di server."
+        )
+
+    username_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        admin_username.encode("utf-8"),
+    )
+
+    password_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        admin_password.encode("utf-8"),
+    )
+
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=401,
+            detail="Username atau kata sandi salah.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return credentials.username
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_dashboard():
+def admin_dashboard(
+    username: str = Depends(verify_admin),
+):
     with get_db() as connection:
         rows = connection.execute(
             """
@@ -407,9 +450,7 @@ def admin_dashboard():
         lat = row["latitude"]
         lon = row["longitude"]
 
-        map_url = (
-            f"https://www.google.com/maps?q={lat},{lon}"
-        )
+        map_url = f"https://www.google.com/maps?q={lat},{lon}"
 
         table_rows += f"""
         <tr>
@@ -420,102 +461,40 @@ def admin_dashboard():
             <td>{row['accuracy'] if row['accuracy'] is not None else '-'}</td>
             <td>{escape(str(row['notes'] or '-'))}</td>
             <td>{escape(str(row['surveyed_at']))}</td>
-            <td>
-                <a href="{map_url}" target="_blank">
-                    Lihat Peta
-                </a>
-            </td>
+            <td><a href="{map_url}" target="_blank" rel="noopener noreferrer">Lihat Peta</a></td>
         </tr>
         """
 
     if not table_rows:
         table_rows = """
-        <tr>
-            <td colspan="8">Belum ada data survei.</td>
-        </tr>
+        <tr><td colspan="8">Belum ada data survei.</td></tr>
         """
 
-    html = f"""
+    page = f"""
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport"
-              content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta http-equiv="refresh" content="30">
         <title>Dashboard Survei GPS</title>
-
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 24px;
-                background: #f1f5f9;
-                color: #1e293b;
-            }}
-
-            h1 {{
-                margin-bottom: 8px;
-            }}
-
-            .info {{
-                margin-bottom: 20px;
-                color: #475569;
-            }}
-
-            .card {{
-                background: white;
-                padding: 18px;
-                border-radius: 10px;
-                box-shadow: 0 2px 8px #0001;
-                margin-bottom: 20px;
-            }}
-
-            .table-wrap {{
-                overflow-x: auto;
-            }}
-
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                background: white;
-                font-size: 14px;
-            }}
-
-            th, td {{
-                border: 1px solid #e2e8f0;
-                padding: 10px;
-                text-align: left;
-                white-space: nowrap;
-            }}
-
-            th {{
-                background: #e2e8f0;
-            }}
-
-            tr:nth-child(even) {{
-                background: #f8fafc;
-            }}
-
-            a {{
-                color: #0369a1;
-                font-weight: bold;
-            }}
+            body {{ font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f1f5f9; color: #1e293b; }}
+            h1 {{ margin-bottom: 8px; }}
+            .info {{ margin-bottom: 20px; color: #475569; }}
+            .card {{ background: white; padding: 18px; border-radius: 10px; margin-bottom: 20px; }}
+            .table-wrap {{ overflow-x: auto; }}
+            table {{ border-collapse: collapse; width: 100%; background: white; font-size: 14px; }}
+            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; white-space: nowrap; }}
+            th {{ background: #e2e8f0; }}
+            tr:nth-child(even) {{ background: #f8fafc; }}
+            a {{ color: #0369a1; font-weight: bold; }}
         </style>
     </head>
-
     <body>
         <h1>Dashboard Survei GPS</h1>
-
-        <div class="info">
-            Data survei anggota yang tersimpan di server.
-            Halaman diperbarui otomatis setiap 30 detik.
-        </div>
-
-        <div class="card">
-            <strong>Total data survei:</strong> {len(rows)}
-        </div>
-
+        <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 30 detik.</div>
+        <div class="card"><strong>Total data survei:</strong> {len(rows)}</div>
         <div class="table-wrap">
             <table>
                 <thead>
@@ -530,18 +509,14 @@ def admin_dashboard():
                         <th>Peta</th>
                     </tr>
                 </thead>
-
-                <tbody>
-                    {table_rows}
-                </tbody>
+                <tbody>{table_rows}</tbody>
             </table>
         </div>
     </body>
     </html>
     """
 
-    return HTMLResponse(content=html)
-
+    return HTMLResponse(content=page)
 
 # =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
