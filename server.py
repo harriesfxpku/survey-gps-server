@@ -375,6 +375,175 @@ def list_surveys(
 
 
 # =========================================================
+# DASHBOARD WEB ADMIN
+# =========================================================
+
+from fastapi.responses import HTMLResponse
+from html import escape
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard():
+    with get_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                id,
+                member_id,
+                latitude,
+                longitude,
+                accuracy,
+                notes,
+                surveyed_at,
+                received_at
+            FROM surveys
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    table_rows = ""
+
+    for row in rows:
+        lat = row["latitude"]
+        lon = row["longitude"]
+
+        map_url = (
+            f"https://www.google.com/maps?q={lat},{lon}"
+        )
+
+        table_rows += f"""
+        <tr>
+            <td>{row['id']}</td>
+            <td>{escape(str(row['member_id']))}</td>
+            <td>{lat}</td>
+            <td>{lon}</td>
+            <td>{row['accuracy'] if row['accuracy'] is not None else '-'}</td>
+            <td>{escape(str(row['notes'] or '-'))}</td>
+            <td>{escape(str(row['surveyed_at']))}</td>
+            <td>
+                <a href="{map_url}" target="_blank">
+                    Lihat Peta
+                </a>
+            </td>
+        </tr>
+        """
+
+    if not table_rows:
+        table_rows = """
+        <tr>
+            <td colspan="8">Belum ada data survei.</td>
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport"
+              content="width=device-width, initial-scale=1">
+        <meta http-equiv="refresh" content="30">
+        <title>Dashboard Survei GPS</title>
+
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 24px;
+                background: #f1f5f9;
+                color: #1e293b;
+            }}
+
+            h1 {{
+                margin-bottom: 8px;
+            }}
+
+            .info {{
+                margin-bottom: 20px;
+                color: #475569;
+            }}
+
+            .card {{
+                background: white;
+                padding: 18px;
+                border-radius: 10px;
+                box-shadow: 0 2px 8px #0001;
+                margin-bottom: 20px;
+            }}
+
+            .table-wrap {{
+                overflow-x: auto;
+            }}
+
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+                background: white;
+                font-size: 14px;
+            }}
+
+            th, td {{
+                border: 1px solid #e2e8f0;
+                padding: 10px;
+                text-align: left;
+                white-space: nowrap;
+            }}
+
+            th {{
+                background: #e2e8f0;
+            }}
+
+            tr:nth-child(even) {{
+                background: #f8fafc;
+            }}
+
+            a {{
+                color: #0369a1;
+                font-weight: bold;
+            }}
+        </style>
+    </head>
+
+    <body>
+        <h1>Dashboard Survei GPS</h1>
+
+        <div class="info">
+            Data survei anggota yang tersimpan di server.
+            Halaman diperbarui otomatis setiap 30 detik.
+        </div>
+
+        <div class="card">
+            <strong>Total data survei:</strong> {len(rows)}
+        </div>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>ID Anggota</th>
+                        <th>Latitude</th>
+                        <th>Longitude</th>
+                        <th>Akurasi (m)</th>
+                        <th>Catatan</th>
+                        <th>Waktu Survei</th>
+                        <th>Peta</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html)
+
+
+# =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
 # =========================================================
 
