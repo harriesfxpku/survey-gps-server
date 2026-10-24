@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 # =========================================================
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("//"):
+    DATABASE_URL = "postgresql:" + DATABASE_URL
 API_TOKEN = os.environ.get("API_TOKEN", "")
 
 api_key_header = APIKeyHeader(
