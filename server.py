@@ -5,6 +5,12 @@ import secrets
 import psycopg
 import uvicorn
 
+import uuid
+import urllib.request
+import urllib.error
+from urllib.parse import quote
+from fastapi import Request
+
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
