@@ -1,20 +1,22 @@
-﻿from datetime import datetime, timezone
-from pathlib import Path
-import sqlite3
-import secrets
+from datetime import datetime, timezone
 import os
+import secrets
+
+import psycopg
+import uvicorn
+
+from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import uvicorn
 
-# Folder dan database
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "survey.db"
 
-# KUNCI AKSES SEMENTARA
-# Kunci ini juga akan dipasang pada aplikasi Flutter.
+# =========================================================
+# KONFIGURASI
+# =========================================================
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 API_TOKEN = os.environ.get("API_TOKEN", "")
 
 api_key_header = APIKeyHeader(
@@ -25,7 +27,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS",
-    version="1.1.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -37,28 +39,30 @@ app.add_middleware(
 )
 
 
-def verify_api_key(api_key: str = Depends(api_key_header)):
-    if not api_key or not secrets.compare_digest(api_key, API_TOKEN):
-        raise HTTPException(
-            status_code=401,
-            detail="Kunci akses tidak valid",
-        )
-    return True
-
+# =========================================================
+# KONEKSI DATABASE POSTGRESQL
+# =========================================================
 
 def get_db():
-    connection = sqlite3.connect(DB_PATH, timeout=30)
-    connection.row_factory = sqlite3.Row
-    return connection
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL belum dikonfigurasi."
+        )
+
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        connect_timeout=15,
+    )
 
 
 def initialize_database():
     with get_db() as connection:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS members (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                member_id TEXT UNIQUE NOT NULL,
-                member_name TEXT NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                member_id VARCHAR(50) UNIQUE NOT NULL,
+                member_name VARCHAR(100) NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             )
@@ -66,11 +70,11 @@ def initialize_database():
 
         connection.execute("""
             CREATE TABLE IF NOT EXISTS surveys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                member_id TEXT NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                accuracy REAL,
+                id BIGSERIAL PRIMARY KEY,
+                member_id VARCHAR(50) NOT NULL,
+                latitude DOUBLE PRECISION NOT NULL,
+                longitude DOUBLE PRECISION NOT NULL,
+                accuracy DOUBLE PRECISION,
                 notes TEXT NOT NULL DEFAULT '',
                 surveyed_at TEXT NOT NULL,
                 received_at TEXT NOT NULL
@@ -78,22 +82,79 @@ def initialize_database():
         """)
 
 
+@app.on_event("startup")
+def startup_event():
+    initialize_database()
+
+
+# =========================================================
+# AUTENTIKASI
+# =========================================================
+
+def verify_api_key(
+    api_key: str = Depends(api_key_header),
+):
+    if (
+        not API_TOKEN
+        or not api_key
+        or not secrets.compare_digest(api_key, API_TOKEN)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Kunci akses tidak valid",
+        )
+
+    return True
+
+
+# =========================================================
+# MODEL DATA
+# =========================================================
+
 class MemberCreate(BaseModel):
-    member_id: str = Field(min_length=1, max_length=50)
-    member_name: str = Field(min_length=1, max_length=100)
+    member_id: str = Field(
+        min_length=1,
+        max_length=50,
+    )
+
+    member_name: str = Field(
+        min_length=1,
+        max_length=100,
+    )
 
 
 class SurveyCreate(BaseModel):
-    member_id: str = Field(min_length=1, max_length=50)
-    latitude: float = Field(ge=-90, le=90)
-    longitude: float = Field(ge=-180, le=180)
-    accuracy: float | None = Field(default=None, ge=0)
-    notes: str = Field(default="", max_length=5000)
+    member_id: str = Field(
+        min_length=1,
+        max_length=50,
+    )
+
+    latitude: float = Field(
+        ge=-90,
+        le=90,
+    )
+
+    longitude: float = Field(
+        ge=-180,
+        le=180,
+    )
+
+    accuracy: float | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    notes: str = Field(
+        default="",
+        max_length=5000,
+    )
+
     surveyed_at: datetime
 
 
-initialize_database()
-
+# =========================================================
+# ENDPOINT UTAMA
+# =========================================================
 
 @app.get("/")
 def home():
@@ -106,8 +167,19 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # Periksa koneksi database juga, bukan sekadar server.
+    with get_db() as connection:
+        connection.execute("SELECT 1")
 
+    return {
+        "status": "ok",
+        "database": "connected",
+    }
+
+
+# =========================================================
+# MANAJEMEN ANGGOTA
+# =========================================================
 
 @app.post("/admin/members")
 def create_member(
@@ -127,9 +199,12 @@ def create_member(
         with get_db() as connection:
             connection.execute(
                 """
-                INSERT INTO members
-                    (member_id, member_name, created_at)
-                VALUES (?, ?, ?)
+                INSERT INTO members (
+                    member_id,
+                    member_name,
+                    created_at
+                )
+                VALUES (%s, %s, %s)
                 """,
                 (
                     member_id,
@@ -137,7 +212,8 @@ def create_member(
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-    except sqlite3.IntegrityError:
+
+    except psycopg.errors.UniqueViolation:
         raise HTTPException(
             status_code=409,
             detail="ID anggota sudah terdaftar",
@@ -151,11 +227,17 @@ def create_member(
 
 
 @app.get("/admin/members")
-def list_members(_: bool = Depends(verify_api_key)):
+def list_members(
+    _: bool = Depends(verify_api_key),
+):
     with get_db() as connection:
         rows = connection.execute(
             """
-            SELECT member_id, member_name, active, created_at
+            SELECT
+                member_id,
+                member_name,
+                active,
+                created_at
             FROM members
             ORDER BY member_id
             """
@@ -163,6 +245,10 @@ def list_members(_: bool = Depends(verify_api_key)):
 
     return [dict(row) for row in rows]
 
+
+# =========================================================
+# PENGIRIMAN DATA SURVEI GPS
+# =========================================================
 
 @app.post("/surveys")
 def create_survey(
@@ -176,7 +262,8 @@ def create_survey(
             """
             SELECT member_id
             FROM members
-            WHERE member_id = ? AND active = 1
+            WHERE member_id = %s
+              AND active = 1
             """,
             (member_id,),
         ).fetchone()
@@ -184,16 +271,25 @@ def create_survey(
         if member is None:
             raise HTTPException(
                 status_code=403,
-                detail="ID anggota tidak terdaftar atau tidak aktif",
+                detail=(
+                    "ID anggota tidak terdaftar "
+                    "atau tidak aktif"
+                ),
             )
 
-        cursor = connection.execute(
+        row = connection.execute(
             """
             INSERT INTO surveys (
-                member_id, latitude, longitude, accuracy,
-                notes, surveyed_at, received_at
+                member_id,
+                latitude,
+                longitude,
+                accuracy,
+                notes,
+                surveyed_at,
+                received_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 member_id,
@@ -204,9 +300,9 @@ def create_survey(
                 survey.surveyed_at.isoformat(),
                 datetime.now(timezone.utc).isoformat(),
             ),
-        )
+        ).fetchone()
 
-        survey_id = cursor.lastrowid
+        survey_id = row["id"]
 
     return {
         "message": "Data survei berhasil disimpan",
@@ -214,6 +310,10 @@ def create_survey(
         "member_id": member_id,
     }
 
+
+# =========================================================
+# MELIHAT HASIL SURVEI
+# =========================================================
 
 @app.get("/admin/surveys")
 def list_surveys(
@@ -226,11 +326,12 @@ def list_surveys(
                 """
                 SELECT *
                 FROM surveys
-                WHERE member_id = ?
+                WHERE member_id = %s
                 ORDER BY id DESC
                 """,
                 (member_id,),
             ).fetchall()
+
         else:
             rows = connection.execute(
                 """
@@ -243,10 +344,13 @@ def list_surveys(
     return [dict(row) for row in rows]
 
 
+# =========================================================
+# MENJALANKAN SERVER SECARA LOKAL
+# =========================================================
+
 if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=int(os.environ.get("PORT", "8000")),
     )
-
