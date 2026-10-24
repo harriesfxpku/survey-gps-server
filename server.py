@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 # =========================================================
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
 if DATABASE_URL.startswith("//"):
     DATABASE_URL = "postgresql:" + DATABASE_URL
+
 API_TOKEN = os.environ.get("API_TOKEN", "")
 
 api_key_header = APIKeyHeader(
@@ -29,7 +31,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -42,7 +44,7 @@ app.add_middleware(
 
 
 # =========================================================
-# KONEKSI DATABASE POSTGRESQL
+# KONEKSI DATABASE
 # =========================================================
 
 def get_db():
@@ -58,8 +60,13 @@ def get_db():
     )
 
 
+# =========================================================
+# MEMBUAT TABEL DAN MEMASTIKAN ANGGOTA TES AKTIF
+# =========================================================
+
 def initialize_database():
     with get_db() as connection:
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS members (
                 id BIGSERIAL PRIMARY KEY,
@@ -82,6 +89,29 @@ def initialize_database():
                 received_at TEXT NOT NULL
             )
         """)
+
+        # Pastikan anggota tes tersedia dan aktif.
+        # Anggota lain dan data survei tidak dihapus.
+        connection.execute(
+            """
+            INSERT INTO members (
+                member_id,
+                member_name,
+                active,
+                created_at
+            )
+            VALUES (%s, %s, 1, %s)
+            ON CONFLICT (member_id)
+            DO UPDATE SET
+                member_name = EXCLUDED.member_name,
+                active = 1
+            """,
+            (
+                "PETUGAS001",
+                "Petugas Tes",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
 
 @app.on_event("startup")
@@ -155,7 +185,7 @@ class SurveyCreate(BaseModel):
 
 
 # =========================================================
-# ENDPOINT UTAMA
+# HALAMAN UTAMA
 # =========================================================
 
 @app.get("/")
@@ -169,7 +199,6 @@ def home():
 
 @app.get("/health")
 def health():
-    # Periksa koneksi database juga, bukan sekadar server.
     with get_db() as connection:
         connection.execute("SELECT 1")
 
@@ -333,7 +362,6 @@ def list_surveys(
                 """,
                 (member_id,),
             ).fetchall()
-
         else:
             rows = connection.execute(
                 """
