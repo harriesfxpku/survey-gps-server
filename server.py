@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import os
 import secrets
+from fastapi import UploadFile, File, Form
 
 import psycopg
 import uvicorn
@@ -96,6 +97,19 @@ def initialize_database():
                 notes TEXT NOT NULL DEFAULT '',
                 surveyed_at TEXT NOT NULL,
                 received_at TEXT NOT NULL
+            )
+        """)
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS survey_media (
+                id BIGSERIAL PRIMARY KEY,
+                survey_id BIGINT NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
+                member_id VARCHAR(50) NOT NULL,
+                object_path TEXT NOT NULL UNIQUE,
+                content_type VARCHAR(100) NOT NULL,
+                original_filename TEXT,
+                file_size BIGINT NOT NULL,
+                uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
 
@@ -383,16 +397,157 @@ def list_surveys(
     return [dict(row) for row in rows]
 
 
+
+# =========================================================
+# UNGGAH FOTO DAN VIDEO SURVEI
+# =========================================================
+
+@app.post("/surveys/{survey_id}/media")
+async def upload_survey_media(
+    survey_id: int,
+    member_id: str = Form(...),
+    file: UploadFile = File(...),
+    _: bool = Depends(verify_api_key),
+):
+    allowed_types = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+    }
+
+    content_type = (file.content_type or "").lower()
+    if content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Jenis file tidak diizinkan. Gunakan JPEG, PNG, WebP, MP4, atau MOV.",
+        )
+
+    max_size = 50 * 1024 * 1024
+    content = await file.read(max_size + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="File kosong.")
+    if len(content) > max_size:
+        raise HTTPException(status_code=413, detail="Ukuran file maksimal 50 MB.")
+
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Konfigurasi penyimpanan Supabase belum lengkap.",
+        )
+
+    member_id = member_id.strip()
+    with get_db() as connection:
+        survey = connection.execute(
+            """
+            SELECT id, member_id
+            FROM surveys
+            WHERE id = %s AND member_id = %s
+            """,
+            (survey_id, member_id),
+        ).fetchone()
+
+    if survey is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Data survei tidak ditemukan untuk ID anggota tersebut.",
+        )
+
+    # Nama objek dibuat oleh server, bukan dari nama file pengguna.
+    object_path = f"surveys/{survey_id}/{uuid.uuid4().hex}{allowed_types[content_type]}"
+    storage_url = (
+        f"{supabase_url}/storage/v1/object/survey-media/"
+        f"{quote(object_path, safe='/')}"
+    )
+    request = urllib.request.Request(
+        storage_url,
+        data=content,
+        headers={
+            "Authorization": f"Bearer {supabase_key}",
+            "apikey": supabase_key,
+            "Content-Type": content_type,
+            "x-upsert": "false",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            if response.status not in (200, 201):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Supabase gagal menyimpan file.",
+                )
+    except urllib.error.HTTPError as exc:
+        # Jangan kirim secret key ke respons; catat hanya kode status.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase menolak unggahan (HTTP {exc.code}). Periksa bucket dan konfigurasi.",
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Supabase tidak dapat dijangkau saat mengunggah file.",
+        ) from exc
+
+    with get_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO survey_media (
+                survey_id,
+                member_id,
+                object_path,
+                content_type,
+                original_filename,
+                file_size
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                survey_id,
+                member_id,
+                object_path,
+                content_type,
+                os.path.basename(file.filename or "file"),
+                len(content),
+            ),
+        )
+
+    return {
+        "message": "File berhasil diunggah.",
+        "survey_id": survey_id,
+        "member_id": member_id,
+        "file_path": object_path,
+        "content_type": content_type,
+        "file_size": len(content),
+    }
+
+
+@app.get("/admin/surveys/{survey_id}/media")
+def list_survey_media(
+    survey_id: int,
+    _: bool = Depends(verify_api_key),
+):
+    with get_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, survey_id, member_id, object_path,
+                   content_type, original_filename, file_size, uploaded_at
+            FROM survey_media
+            WHERE survey_id = %s
+            ORDER BY id
+            """,
+            (survey_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 # =========================================================
 # DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
-
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse
-from html import escape
-import secrets
-import os
 
 admin_security = HTTPBasic()
 
