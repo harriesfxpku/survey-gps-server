@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from fastapi import Security
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from html import escape
@@ -557,6 +557,100 @@ def list_survey_media(
 
 
 # =========================================================
+# HAPUS SATU SURVEI BESERTA MEDIA TERKAIT
+# =========================================================
+
+def delete_survey_record(survey_id: int):
+    """Hapus media survei terpilih, lalu catatan surveinya."""
+    with get_db() as connection:
+        survey = connection.execute(
+            "SELECT id FROM surveys WHERE id = %s",
+            (survey_id,),
+        ).fetchone()
+        if survey is None:
+            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+        media_rows = connection.execute(
+            "SELECT object_path FROM survey_media WHERE survey_id = %s",
+            (survey_id,),
+        ).fetchall()
+
+    object_paths = [row["object_path"] for row in media_rows]
+
+    if object_paths:
+        supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+        if not supabase_url or not supabase_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Konfigurasi Supabase belum lengkap. Survei tidak dihapus.",
+            )
+
+        storage_url = f"{supabase_url}/storage/v1/object/survey-media"
+        payload = json.dumps({"prefixes": object_paths}).encode("utf-8")
+        request = urllib.request.Request(
+            storage_url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {supabase_key}",
+                "apikey": supabase_key,
+                "Content-Type": "application/json",
+            },
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                if response.status not in (200, 204):
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Supabase tidak mengonfirmasi penghapusan media.",
+                    )
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            print(
+                f"Supabase delete error: HTTP {exc.code}; response: {error_body[:500]}",
+                flush=True,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Supabase gagal menghapus media (HTTP {exc.code}). Survei belum dihapus dari database.",
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            print(f"Supabase delete connection error: {type(exc).__name__}", flush=True)
+            raise HTTPException(
+                status_code=502,
+                detail="Supabase tidak dapat dijangkau. Survei belum dihapus dari database.",
+            ) from exc
+
+    with get_db() as connection:
+        connection.execute(
+            "DELETE FROM survey_media WHERE survey_id = %s",
+            (survey_id,),
+        )
+        result = connection.execute(
+            "DELETE FROM surveys WHERE id = %s",
+            (survey_id,),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+
+    return {
+        "message": "Survei dan media terkait berhasil dihapus.",
+        "survey_id": survey_id,
+        "media_deleted": len(object_paths),
+    }
+
+
+@app.delete("/admin/surveys/{survey_id}")
+def delete_survey_api(
+    survey_id: int,
+    _: bool = Depends(verify_api_key),
+):
+    return delete_survey_record(survey_id)
+
+
+
+
+# =========================================================
 # DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
 
@@ -639,6 +733,26 @@ def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> str 
         return None
 
 
+@app.post("/admin/surveys/{survey_id}/delete")
+def delete_survey_from_admin(
+    survey_id: int,
+    username: str = Depends(verify_admin),
+):
+    try:
+        delete_survey_record(survey_id)
+    except HTTPException as exc:
+        message = escape(str(exc.detail))
+        return HTMLResponse(
+            content=(
+                "<h2>Penghapusan gagal</h2>"
+                f"<p>{message}</p>"
+                '<p><a href="/admin">Kembali ke dashboard</a></p>'
+            ),
+            status_code=exc.status_code,
+        )
+    return RedirectResponse(url="/admin", status_code=303)
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(
     username: str = Depends(verify_admin),
@@ -714,11 +828,17 @@ def admin_dashboard(
             <td>{escape(str(row['surveyed_at']))}</td>
             <td><a href="{map_url}" target="_blank" rel="noopener noreferrer">Lihat Peta</a></td>
             <td class="media-cell">{media_cell}</td>
+            <td>
+                <form method="post" action="/admin/surveys/{survey_id}/delete"
+                      onsubmit="return confirm('Hapus permanen survei ID {survey_id} beserta foto dan videonya?');">
+                    <button type="submit" class="delete-button">Delete</button>
+                </form>
+            </td>
         </tr>
         """
 
     if not table_rows:
-        table_rows = '<tr><td colspan="9">Belum ada data survei.</td></tr>'
+        table_rows = '<tr><td colspan="10">Belum ada data survei.</td></tr>'
 
     page = f"""
     <!DOCTYPE html>
@@ -745,6 +865,9 @@ def admin_dashboard(
             .media-video {{ display: block; width: 220px; max-width: 100%; margin: 4px 0; }}
             small {{ display: block; color: #64748b; margin-bottom: 8px; }}
             .muted {{ color: #64748b; }}
+            .delete-button {{ background: #b91c1c; color: #fff; border: 0; border-radius: 5px; padding: 8px 10px; cursor: pointer; }}
+            .delete-button:hover {{ background: #991b1b; }}
+            form {{ margin: 0; }}
         </style>
     </head>
     <body>
@@ -756,7 +879,7 @@ def admin_dashboard(
                 <thead>
                     <tr>
                         <th>ID</th><th>ID Anggota</th><th>Latitude</th><th>Longitude</th>
-                        <th>Akurasi (m)</th><th>Catatan</th><th>Waktu Survei</th><th>Peta</th><th>Foto / Video</th>
+                        <th>Akurasi (m)</th><th>Catatan</th><th>Waktu Survei</th><th>Peta</th><th>Foto / Video</th><th>Aksi</th>
                     </tr>
                 </thead>
                 <tbody>{table_rows}</tbody>
