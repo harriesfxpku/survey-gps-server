@@ -482,12 +482,22 @@ async def upload_survey_media(
                     detail="Supabase gagal menyimpan file.",
                 )
     except urllib.error.HTTPError as exc:
-        # Jangan kirim secret key ke respons; catat hanya kode status.
+        # Log respons Supabase untuk diagnosis. Secret key tidak dicatat.
+        error_body = exc.read().decode("utf-8", errors="replace")
+        print(
+            f"Supabase upload error: HTTP {exc.code}; "
+            f"response: {error_body[:1000]}",
+            flush=True,
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Supabase menolak unggahan (HTTP {exc.code}). Periksa bucket dan konfigurasi.",
+            detail=f"Supabase menolak unggahan (HTTP {exc.code}).",
         ) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
+        print(
+            f"Supabase connection error: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
         raise HTTPException(
             status_code=502,
             detail="Supabase tidak dapat dijangkau saat mengunggah file.",
