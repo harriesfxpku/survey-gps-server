@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import os
+import json
 import secrets
 from fastapi import UploadFile, File, Form
 
@@ -594,6 +595,50 @@ def verify_admin(
     return credentials.username
 
 
+def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> str | None:
+    """Buat URL sementara untuk menampilkan file dari bucket privat."""
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        print("Dashboard media: konfigurasi Supabase belum lengkap.", flush=True)
+        return None
+
+    sign_url = (
+        f"{supabase_url}/storage/v1/object/sign/survey-media/"
+        f"{quote(object_path, safe='/')}"
+    )
+    payload = json.dumps({"expiresIn": expires_in}).encode("utf-8")
+    request = urllib.request.Request(
+        sign_url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {supabase_key}",
+            "apikey": supabase_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        signed_path = result.get("signedURL") or result.get("signedUrl")
+        if not signed_path:
+            print("Dashboard media: respons URL bertanda tangan tidak berisi signedURL.", flush=True)
+            return None
+        if signed_path.startswith("http://") or signed_path.startswith("https://"):
+            return signed_path
+        if signed_path.startswith("/"):
+            # Supabase biasanya mengembalikan path /object/sign/...
+            if signed_path.startswith("/storage/v1/"):
+                return f"{supabase_url}{signed_path}"
+            return f"{supabase_url}/storage/v1{signed_path}"
+        return f"{supabase_url}/storage/v1/{signed_path.lstrip('/')}"
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        status = getattr(exc, "code", "connection")
+        print(f"Dashboard media: gagal membuat signed URL ({status}).", flush=True)
+        return None
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(
     username: str = Depends(verify_admin),
@@ -601,45 +646,79 @@ def admin_dashboard(
     with get_db() as connection:
         rows = connection.execute(
             """
-            SELECT
-                id,
-                member_id,
-                latitude,
-                longitude,
-                accuracy,
-                notes,
-                surveyed_at,
-                received_at
+            SELECT id, member_id, latitude, longitude, accuracy,
+                   notes, surveyed_at, received_at
             FROM surveys
             ORDER BY id DESC
             """
         ).fetchall()
+        media_rows = connection.execute(
+            """
+            SELECT id, survey_id, member_id, object_path, content_type,
+                   original_filename, file_size, uploaded_at
+            FROM survey_media
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    media_by_survey = {}
+    for media in media_rows:
+        media_by_survey.setdefault(media["survey_id"], []).append(media)
 
     table_rows = ""
-
     for row in rows:
+        survey_id = row["id"]
         lat = row["latitude"]
         lon = row["longitude"]
-
         map_url = f"https://www.google.com/maps?q={lat},{lon}"
+
+        media_html = []
+        for media in media_by_survey.get(survey_id, []):
+            signed_url = create_supabase_signed_url(media["object_path"])
+            filename = escape(str(media["original_filename"] or "Media"))
+            content_type = str(media["content_type"] or "")
+            size_mb = media["file_size"] / (1024 * 1024)
+            if signed_url:
+                safe_url = escape(signed_url, quote=True)
+                if content_type.startswith("image/"):
+                    media_html.append(
+                        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+                        f'<img class="media-thumb" src="{safe_url}" alt="{filename}"></a>'
+                        f'<div><a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+                        f'<small>{size_mb:.2f} MB</small></div>'
+                    )
+                elif content_type.startswith("video/"):
+                    media_html.append(
+                        f'<video class="media-video" controls preload="metadata" src="{safe_url}"></video>'
+                        f'<div><a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+                        f'<small>{size_mb:.2f} MB</small></div>'
+                    )
+                else:
+                    media_html.append(
+                        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+                    )
+            else:
+                media_html.append(
+                    f'<span>{filename} (tersimpan, pratinjau gagal dibuat)</span>'
+                )
+        media_cell = "<br>".join(media_html) if media_html else '<span class="muted">Belum ada media</span>'
 
         table_rows += f"""
         <tr>
-            <td>{row['id']}</td>
+            <td>{survey_id}</td>
             <td>{escape(str(row['member_id']))}</td>
             <td>{lat}</td>
             <td>{lon}</td>
             <td>{row['accuracy'] if row['accuracy'] is not None else '-'}</td>
-            <td>{escape(str(row['notes'] or '-'))}</td>
+            <td class="notes">{escape(str(row['notes'] or '-'))}</td>
             <td>{escape(str(row['surveyed_at']))}</td>
             <td><a href="{map_url}" target="_blank" rel="noopener noreferrer">Lihat Peta</a></td>
+            <td class="media-cell">{media_cell}</td>
         </tr>
         """
 
     if not table_rows:
-        table_rows = """
-        <tr><td colspan="8">Belum ada data survei.</td></tr>
-        """
+        table_rows = '<tr><td colspan="9">Belum ada data survei.</td></tr>'
 
     page = f"""
     <!DOCTYPE html>
@@ -647,7 +726,7 @@ def admin_dashboard(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="30">
+        <meta http-equiv="refresh" content="60">
         <title>Dashboard Survei GPS</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f1f5f9; color: #1e293b; }}
@@ -656,28 +735,28 @@ def admin_dashboard(
             .card {{ background: white; padding: 18px; border-radius: 10px; margin-bottom: 20px; }}
             .table-wrap {{ overflow-x: auto; }}
             table {{ border-collapse: collapse; width: 100%; background: white; font-size: 14px; }}
-            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; white-space: nowrap; }}
-            th {{ background: #e2e8f0; }}
+            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; vertical-align: top; }}
+            th {{ background: #e2e8f0; white-space: nowrap; }}
             tr:nth-child(even) {{ background: #f8fafc; }}
             a {{ color: #0369a1; font-weight: bold; }}
+            .notes {{ min-width: 140px; white-space: pre-wrap; }}
+            .media-cell {{ min-width: 180px; max-width: 260px; overflow-wrap: anywhere; }}
+            .media-thumb {{ display: block; width: auto; max-width: 180px; max-height: 150px; border-radius: 6px; margin: 4px 0; }}
+            .media-video {{ display: block; width: 220px; max-width: 100%; margin: 4px 0; }}
+            small {{ display: block; color: #64748b; margin-bottom: 8px; }}
+            .muted {{ color: #64748b; }}
         </style>
     </head>
     <body>
         <h1>Dashboard Survei GPS</h1>
-        <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 30 detik.</div>
-        <div class="card"><strong>Total data survei:</strong> {len(rows)}</div>
+        <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 60 detik. Pratinjau media menggunakan tautan sementara untuk bucket privat.</div>
+        <div class="card"><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows)}</div>
         <div class="table-wrap">
             <table>
                 <thead>
                     <tr>
-                        <th>ID</th>
-                        <th>ID Anggota</th>
-                        <th>Latitude</th>
-                        <th>Longitude</th>
-                        <th>Akurasi (m)</th>
-                        <th>Catatan</th>
-                        <th>Waktu Survei</th>
-                        <th>Peta</th>
+                        <th>ID</th><th>ID Anggota</th><th>Latitude</th><th>Longitude</th>
+                        <th>Akurasi (m)</th><th>Catatan</th><th>Waktu Survei</th><th>Peta</th><th>Foto / Video</th>
                     </tr>
                 </thead>
                 <tbody>{table_rows}</tbody>
@@ -686,7 +765,6 @@ def admin_dashboard(
     </body>
     </html>
     """
-
     return HTMLResponse(content=page)
 
 # =========================================================
