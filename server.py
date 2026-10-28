@@ -3,7 +3,8 @@ import os
 import json
 import secrets
 import hashlib
-from fastapi import UploadFile, File, Form
+import io
+from fastapi import UploadFile, File, Form, Response
 
 import psycopg
 import uvicorn
@@ -19,7 +20,7 @@ from psycopg.types.json import Jsonb
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from fastapi import Security
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from html import escape
@@ -43,8 +44,8 @@ api_key_header = APIKeyHeader(
 
 app = FastAPI(
     title="Survei GPS API - Multi Desa",
-    description="Server pusat aplikasi Survei GPS (Aur Sati & Balam Jaya)",
-    version="3.2.0",
+    description="Server pusat aplikasi Survei GPS (Mendukung 18+ Desa & Ekspor Laporan)",
+    version="3.3.0",
 )
 
 app.add_middleware(
@@ -57,7 +58,7 @@ app.add_middleware(
 
 
 # =========================================================
-# KONEKSI DATABASE & ROUTING BUCKET DINAMIS
+# KONEKSI DATABASE & SUPABASE BUCKET
 # =========================================================
 
 def get_db():
@@ -73,28 +74,15 @@ def get_db():
     )
 
 
-def get_supabase_config_for_village(village: str | None = None):
-    """
-    Menentukan URL, Key, dan Nama Bucket Supabase berdasarkan desa.
-    Mendukung Aur-Sati-Kec-Tambang, Balam-Jaya-Kec-Tambang, dan fallback ke survey-media.
-    """
+def get_supabase_config():
     supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
     supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
-    
-    v_lower = (village or "").strip().lower()
-    
-    if "aur sati" in v_lower:
-        bucket_name = os.environ.get("SUPABASE_BUCKET_AUR_SATI", "Aur-Sati-Kec-Tambang")
-    elif "balam jaya" in v_lower:
-        bucket_name = os.environ.get("SUPABASE_BUCKET_BALAM_JAYA", "Balam-Jaya-Kec-Tambang")
-    else:
-        bucket_name = os.environ.get("SUPABASE_DEFAULT_BUCKET", "survey-media")
-        
+    bucket_name = os.environ.get("SUPABASE_DEFAULT_BUCKET", "survey-media")
     return supabase_url, supabase_key, bucket_name
 
 
 # =========================================================
-# MEMBUAT TABEL DAN MIGRASI AMAN
+# MEMBUAT TABEL DAN MEMASTIKAN ANGGOTA TES AKTIF
 # =========================================================
 
 def initialize_database():
@@ -284,7 +272,7 @@ def startup_event():
 
 
 # =========================================================
-# AUTENTIKASI & IDENTITAS
+# AUTENTIKASI
 # =========================================================
 
 def verify_api_key(
@@ -570,7 +558,7 @@ class SurveyCreate(BaseModel):
 
 
 # =========================================================
-# HALAMAN UTAMA & KESEHATAN SISTEM
+# HALAMAN UTAMA
 # =========================================================
 
 @app.get("/")
@@ -578,7 +566,7 @@ def home():
     return {
         "server": "Survei GPS Multi-Desa",
         "status": "online",
-        "message": "Server berjalan dengan baik untuk Aur Sati & Balam Jaya",
+        "message": "Server berjalan dengan baik (Mendukung 18+ Desa & Ekspor Data)",
     }
 
 
@@ -689,10 +677,7 @@ def create_survey(
         if member is None:
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "ID anggota tidak terdaftar "
-                    "atau tidak aktif"
-                ),
+                detail="ID anggota tidak terdaftar atau tidak aktif",
             )
 
         row = connection.execute(
@@ -742,29 +727,35 @@ def create_survey(
     }
 
 
+# =========================================================
+# MELIHAT HASIL SURVEI
+# =========================================================
+
 @app.get("/admin/surveys")
 def list_surveys(
     member_id: str | None = None,
+    village: str | None = None,
     _: bool = Depends(verify_api_key),
 ):
     with get_db() as connection:
-        if member_id:
+        if member_id and village:
             rows = connection.execute(
-                """
-                SELECT *
-                FROM surveys
-                WHERE member_id = %s
-                ORDER BY id DESC
-                """,
+                "SELECT * FROM surveys WHERE member_id = %s AND village = %s ORDER BY id DESC",
+                (member_id, village),
+            ).fetchall()
+        elif member_id:
+            rows = connection.execute(
+                "SELECT * FROM surveys WHERE member_id = %s ORDER BY id DESC",
                 (member_id,),
+            ).fetchall()
+        elif village:
+            rows = connection.execute(
+                "SELECT * FROM surveys WHERE village = %s ORDER BY id DESC",
+                (village,),
             ).fetchall()
         else:
             rows = connection.execute(
-                """
-                SELECT *
-                FROM surveys
-                ORDER BY id DESC
-                """
+                "SELECT * FROM surveys ORDER BY id DESC"
             ).fetchall()
 
     return [dict(row) for row in rows]
@@ -820,10 +811,9 @@ def get_survey_for_verification(
                FROM verification_media WHERE survey_id = %s ORDER BY id""", (survey_id,)
         ).fetchall()
 
-    village = survey.get("village", "")
     def media_with_url(row):
         item = dict(row)
-        item["signed_url"] = create_supabase_signed_url(item["object_path"], village)
+        item["signed_url"] = create_supabase_signed_url(item["object_path"])
         return item
 
     return {
@@ -849,6 +839,10 @@ async def upload_verification_media(
         raise HTTPException(status_code=400, detail="File foto kosong.")
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Ukuran setiap foto verifikasi maksimal 20 MB.")
+    
+    supabase_url, supabase_key, bucket_name = get_supabase_config()
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
 
     with get_db() as connection:
         survey = connection.execute("SELECT id, village FROM surveys WHERE id = %s", (survey_id,)).fetchone()
@@ -858,13 +852,8 @@ async def upload_verification_media(
         if count >= 5:
             raise HTTPException(status_code=400, detail="Maksimal 5 foto bukti verifikasi per survei.")
 
-    supabase_url, supabase_key, bucket_name = get_supabase_config_for_village(survey["village"])
-    if not supabase_url or not supabase_key:
-        raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
-
     object_path = f"verifications/{survey_id}/{uuid.uuid4().hex}{extensions[content_type]}"
     storage_url = f"{supabase_url}/storage/v1/object/{bucket_name}/{quote(object_path, safe='/')}"
-    
     request = urllib.request.Request(storage_url, data=content, headers={
         "Authorization": f"Bearer {supabase_key}", "apikey": supabase_key,
         "Content-Type": content_type, "x-upsert": "false",
@@ -875,7 +864,6 @@ async def upload_verification_media(
                 raise HTTPException(status_code=502, detail="Supabase gagal menyimpan foto verifikasi.")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        print(f"Supabase verification upload error: HTTP {exc.code}; {body[:500]}", flush=True)
         raise HTTPException(status_code=502, detail=f"Supabase menolak foto verifikasi (HTTP {exc.code}).") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise HTTPException(status_code=502, detail="Supabase tidak dapat dijangkau saat mengunggah foto verifikasi.") from exc
@@ -979,10 +967,7 @@ async def upload_survey_media(
 
     content_type = (file.content_type or "").lower()
     if content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail="Jenis file tidak diizinkan. Gunakan JPEG, PNG, WebP, MP4, atau MOV.",
-        )
+        raise HTTPException(status_code=400, detail="Jenis file tidak diizinkan. Gunakan JPEG, PNG, WebP, MP4, atau MOV.")
 
     allowed_categories = {
         "applicant_ktp": (1, "image"),
@@ -1005,50 +990,29 @@ async def upload_survey_media(
     if len(content) > max_size:
         raise HTTPException(status_code=413, detail="Ukuran file maksimal 200 MB.")
 
+    supabase_url, supabase_key, bucket_name = get_supabase_config()
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
+
     member_id = member_id.strip()
     with get_db() as connection:
         survey = connection.execute(
-            """
-            SELECT id, member_id, village
-            FROM surveys
-            WHERE id = %s AND member_id = %s
-            """,
+            "SELECT id, member_id, village FROM surveys WHERE id = %s AND member_id = %s",
             (survey_id, member_id),
         ).fetchone()
-        
-        if survey is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Data survei tidak ditemukan untuk ID anggota tersebut.",
-            )
-
         category_count = connection.execute(
             "SELECT COUNT(*) AS total FROM survey_media WHERE survey_id = %s AND media_category = %s",
             (survey_id, media_category),
         ).fetchone()["total"]
 
-    if category_count >= category_limit:
-        label = {
-            "applicant_ktp": "foto KTP",
-            "family_card": "foto KK",
-            "recipient_photo": "foto penerima bantuan",
-            "business_photo": "foto dokumentasi usaha (maksimal 5)",
-            "business_video": "video usaha",
-        }[media_category]
-        raise HTTPException(status_code=400, detail=f"Batas {label} sudah tercapai.")
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan untuk ID anggota tersebut.")
 
-    supabase_url, supabase_key, bucket_name = get_supabase_config_for_village(survey["village"])
-    if not supabase_url or not supabase_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Konfigurasi penyimpanan Supabase belum lengkap.",
-        )
+    if category_count >= category_limit:
+        raise HTTPException(status_code=400, detail=f"Batas kategori {media_category} sudah tercapai.")
 
     object_path = f"surveys/{survey_id}/{media_category}/{uuid.uuid4().hex}{allowed_types[content_type]}"
-    storage_url = (
-        f"{supabase_url}/storage/v1/object/{bucket_name}/"
-        f"{quote(object_path, safe='/')}"
-    )
+    storage_url = f"{supabase_url}/storage/v1/object/{bucket_name}/{quote(object_path, safe='/')}"
     
     request = urllib.request.Request(
         storage_url,
@@ -1065,45 +1029,25 @@ async def upload_survey_media(
     try:
         with urllib.request.urlopen(request, timeout=240) as response:
             if response.status not in (200, 201):
-                raise HTTPException(
-                    status_code=502,
-                    detail="Supabase gagal menyimpan file.",
-                )
+                raise HTTPException(status_code=502, detail="Supabase gagal menyimpan file.")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
-        print(f"Supabase upload error: HTTP {exc.code}; response: {error_body[:1000]}", flush=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Supabase menolak unggahan (HTTP {exc.code}).",
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Supabase menolak unggahan (HTTP {exc.code}).") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Supabase tidak dapat dijangkau saat mengunggah file.",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Supabase tidak dapat dijangkau saat mengunggah file.") from exc
 
     with get_db() as connection:
         connection.execute(
             """
             INSERT INTO survey_media (
-                survey_id,
-                member_id,
-                object_path,
-                content_type,
-                original_filename,
-                file_size,
-                media_category
+                survey_id, member_id, object_path, content_type,
+                original_filename, file_size, media_category
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                survey_id,
-                member_id,
-                object_path,
-                content_type,
-                os.path.basename(file.filename or "file"),
-                len(content),
-                media_category,
+                survey_id, member_id, object_path, content_type,
+                os.path.basename(file.filename or "file"), len(content), media_category,
             ),
         )
 
@@ -1140,19 +1084,170 @@ def list_survey_media(
 
 
 # =========================================================
-# PENGHAPUSAN SURVEI & MEDIA LINTAS BUCKET
+# MODUL EKSPOR LAPORAN REKAPITULASI (EXCEL & PDF)
+# =========================================================
+
+@app.get("/admin/export/excel")
+def export_surveys_excel(
+    username: str = Depends(verify_admin),
+):
+    """Menghasilkan file CSV/Excel berisi seluruh data rekapitulasi survei & verifikasi."""
+    with get_db() as connection:
+        surveys = connection.execute("SELECT * FROM surveys ORDER BY id DESC").fetchall()
+        verifications = {v["survey_id"]: v for v in connection.execute("SELECT * FROM survey_verifications").fetchall()}
+
+    headers = [
+        "ID Survei", "ID Petugas DPSS", "Desa / Wilayah", "Nama Pemohon", "NIK Pemohon", 
+        "No HP", "Alamat Pemohon", "Nama Usaha", "Jenis Usaha", "Tahun Berdiri", 
+        "Lokasi Usaha", "Status Kepemilikan", "NIB", "Modal Usaha (Rp)", "Omzet (Rp)", 
+        "Laba Bersih (Rp)", "Jumlah Pekerja", "Status Usaha", "Kendala Usaha", "Bantuan Diminta", 
+        "Estimasi Bantuan", "Alasan Bantuan", "Koordinat GPS", "Waktu Survei",
+        "Keputusan DPS", "Petugas DPS", "Total Kebutuhan DPS (Rp)", "Status Verifikasi", "Catatan Verifikasi"
+    ]
+
+    output = io.StringIO()
+    output.write("\ufeff") # UTF-8 BOM agar Excel dapat membuka karakter khusus dengan benar
+    output.write(",".join([f'"{h}"' for h in headers]) + "\n")
+
+    for s in surveys:
+        s_id = s["id"]
+        v = verifications.get(s_id, {})
+        row = [
+            str(s_id),
+            s.get("member_id", ""),
+            s.get("village", ""),
+            s.get("applicant_name", ""),
+            s.get("applicant_nik", ""),
+            s.get("applicant_phone", ""),
+            s.get("applicant_address", "").replace("\n", " "),
+            s.get("business_name", ""),
+            s.get("business_type", ""),
+            s.get("business_since", ""),
+            s.get("business_location", ""),
+            s.get("ownership_status", ""),
+            s.get("nib", ""),
+            str(s.get("capital_amount") or 0),
+            str(s.get("turnover_amount") or 0),
+            str(s.get("net_profit_amount") or 0),
+            str(s.get("worker_count") or 0),
+            s.get("business_active", ""),
+            s.get("business_issues", "").replace("\n", " "),
+            s.get("assistance_types", ""),
+            str(s.get("assistance_amount") or 0),
+            s.get("assistance_reason", "").replace("\n", " "),
+            f"{s.get('latitude')}, {s.get('longitude')}",
+            s.get("surveyed_at", ""),
+            v.get("decision", "-"),
+            v.get("verifier_name", "-"),
+            str(v.get("total_needs_amount") or 0),
+            s.get("verification_status", "Belum diverifikasi"),
+            s.get("verification_notes", "").replace("\n", " "),
+        ]
+        escaped_row = ['"' + str(val).replace('"', '""') + '"' for val in row]
+        output.write(",".join(escaped_row) + "\n")
+
+    filename = f"Rekap_Survei_UMKM_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.get("/admin/export/pdf", response_class=HTMLResponse)
+def export_surveys_pdf(
+    username: str = Depends(verify_admin),
+):
+    """Menghasilkan dokumen cetak Laporan Resmi Rekapitulasi Survei dalam format HTML Print/PDF."""
+    with get_db() as connection:
+        surveys = connection.execute("SELECT * FROM surveys ORDER BY id DESC").fetchall()
+        verifications = {v["survey_id"]: v for v in connection.execute("SELECT * FROM survey_verifications").fetchall()}
+
+    rows_html = ""
+    for idx, s in enumerate(surveys, 1):
+        v = verifications.get(s["id"], {})
+        status_color = "#16a34a" if s.get("verification_status") == "Sudah diverifikasi" else "#dc2626" if s.get("verification_status") == "Ditolak" else "#eab308"
+        rows_html += f"""
+        <tr>
+            <td style="text-align:center;">{idx}</td>
+            <td><b>{escape(s.get('village') or '-')}</b><br><small>ID: #{s['id']}</small></td>
+            <td><b>{escape(s.get('applicant_name') or '-')}</b><br>NIK: {escape(s.get('applicant_nik') or '-')}<br>Hp: {escape(s.get('applicant_phone') or '-')}</td>
+            <td><b>{escape(s.get('business_name') or '-')}</b><br>{escape(s.get('business_type') or '-')}</td>
+            <td>Rp {s.get('capital_amount', 0) or 0:,.0f}</td>
+            <td>Rp {s.get('turnover_amount', 0) or 0:,.0f}</td>
+            <td><span style="color: {status_color}; font-weight: bold;">{escape(s.get('verification_status') or 'Belum diverifikasi')}</span></td>
+            <td>{escape(v.get('decision') or '-')} (DPS: {escape(v.get('verifier_name') or '-')})</td>
+        </tr>
+        """
+
+    pdf_page = f"""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <title>Laporan Rekapitulasi Survei UMKM GPS Multi-Desa</title>
+        <style>
+            @page {{ size: A4 landscape; margin: 12mm; }}
+            body {{ font-family: Arial, sans-serif; font-size: 11px; color: #1e293b; margin: 0; padding: 15px; }}
+            .header {{ text-align: center; margin-bottom: 20px; border-bottom: 2px solid #0f172a; padding-bottom: 10px; }}
+            .header h2 {{ margin: 0; font-size: 18px; text-transform: uppercase; }}
+            .header p {{ margin: 4px 0 0; color: #475569; font-size: 12px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+            th, td {{ border: 1px solid #94a3b8; padding: 7px 9px; text-align: left; vertical-align: top; }}
+            th {{ background: #e2e8f0; font-weight: bold; text-align: center; }}
+            tr:nth-child(even) {{ background: #f8fafc; }}
+            .footer {{ margin-top: 20px; text-align: right; font-size: 10px; color: #64748b; }}
+            @media print {{
+                .no-print {{ display: none; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="no-print" style="margin-bottom: 15px; text-align: right;">
+            <button onclick="window.print()" style="background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">Cetak / Simpan PDF</button>
+        </div>
+        <div class="header">
+            <h2>Laporan Rekapitulasi Pendataan & Verifikasi UMKM</h2>
+            <p>Sistem Survei GPS Multi-Desa • Dicetak pada: {datetime.now().strftime('%d-%m-%Y %H:%M')}</p>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th width="30">No</th>
+                    <th>Desa / Wilayah</th>
+                    <th>Identitas Pemohon</th>
+                    <th>Profil Usaha</th>
+                    <th>Modal Usaha</th>
+                    <th>Omzet Bulanan</th>
+                    <th>Status Verifikasi</th>
+                    <th>Hasil Verifikasi DPS</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html if rows_html else '<tr><td colspan="8" style="text-align:center;">Belum ada data survei.</td></tr>'}
+            </tbody>
+        </table>
+        <div class="footer">
+            Dokumen ini dihasilkan secara otomatis oleh Server Pusat Survei GPS Multi-Desa
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=pdf_page)
+
+
+# =========================================================
+# HAPUS SATU SURVEI BESERTA MEDIA TERKAIT
 # =========================================================
 
 def delete_survey_record(survey_id: int):
     with get_db() as connection:
         survey = connection.execute(
-            "SELECT id, village FROM surveys WHERE id = %s",
+            "SELECT id FROM surveys WHERE id = %s",
             (survey_id,),
         ).fetchone()
         if survey is None:
             raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
-            
-        village = survey["village"]
         media_rows = connection.execute(
             "SELECT object_path FROM survey_media WHERE survey_id = %s",
             (survey_id,),
@@ -1165,12 +1260,9 @@ def delete_survey_record(survey_id: int):
     object_paths = [row["object_path"] for row in media_rows + verification_media_rows]
 
     if object_paths:
-        supabase_url, supabase_key, bucket_name = get_supabase_config_for_village(village)
+        supabase_url, supabase_key, bucket_name = get_supabase_config()
         if not supabase_url or not supabase_key:
-            raise HTTPException(
-                status_code=503,
-                detail="Konfigurasi Supabase belum lengkap. Survei tidak dihapus.",
-            )
+            raise HTTPException(status_code=503, detail="Konfigurasi Supabase belum lengkap.")
 
         storage_url = f"{supabase_url}/storage/v1/object/{bucket_name}"
         payload = json.dumps({"prefixes": object_paths}).encode("utf-8")
@@ -1187,22 +1279,11 @@ def delete_survey_record(survey_id: int):
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
                 if response.status not in (200, 204):
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Supabase tidak mengonfirmasi penghapusan media.",
-                    )
+                    raise HTTPException(status_code=502, detail="Supabase tidak mengonfirmasi penghapusan media.")
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            print(f"Supabase delete error: HTTP {exc.code}; response: {error_body[:500]}", flush=True)
-            raise HTTPException(
-                status_code=502,
-                detail=f"Supabase gagal menghapus media (HTTP {exc.code}).",
-            ) from exc
+            raise HTTPException(status_code=502, detail=f"Supabase gagal menghapus media (HTTP {exc.code}).") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="Supabase tidak dapat dijangkau.",
-            ) from exc
+            raise HTTPException(status_code=502, detail="Supabase tidak dapat dijangkau.") from exc
 
     with get_db() as connection:
         connection.execute("DELETE FROM survey_media WHERE survey_id = %s", (survey_id,))
@@ -1227,7 +1308,7 @@ def delete_survey_api(
 
 
 # =========================================================
-# DASHBOARD WEB ADMIN & MANAJEMEN PETUGAS UI
+# DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
 
 admin_security = HTTPBasic()
@@ -1240,20 +1321,10 @@ def verify_admin(
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
 
     if not admin_username or not admin_password:
-        raise HTTPException(
-            status_code=503,
-            detail="Login admin belum dikonfigurasi di server."
-        )
+        raise HTTPException(status_code=503, detail="Login admin belum dikonfigurasi di server.")
 
-    username_ok = secrets.compare_digest(
-        credentials.username.encode("utf-8"),
-        admin_username.encode("utf-8"),
-    )
-
-    password_ok = secrets.compare_digest(
-        credentials.password.encode("utf-8"),
-        admin_password.encode("utf-8"),
-    )
+    username_ok = secrets.compare_digest(credentials.username.encode("utf-8"), admin_username.encode("utf-8"))
+    password_ok = secrets.compare_digest(credentials.password.encode("utf-8"), admin_password.encode("utf-8"))
 
     if not (username_ok and password_ok):
         raise HTTPException(
@@ -1265,16 +1336,12 @@ def verify_admin(
     return credentials.username
 
 
-def create_supabase_signed_url(object_path: str, village: str | None = None, expires_in: int = 3600) -> str | None:
-    """Buat URL sementara untuk menampilkan file dari bucket privat sesuai desa."""
-    supabase_url, supabase_key, bucket_name = get_supabase_config_for_village(village)
+def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> str | None:
+    supabase_url, supabase_key, bucket_name = get_supabase_config()
     if not supabase_url or not supabase_key:
         return None
 
-    sign_url = (
-        f"{supabase_url}/storage/v1/object/sign/{bucket_name}/"
-        f"{quote(object_path, safe='/')}"
-    )
+    sign_url = f"{supabase_url}/storage/v1/object/sign/{bucket_name}/{quote(object_path, safe='/')}"
     payload = json.dumps({"expiresIn": expires_in}).encode("utf-8")
     request = urllib.request.Request(
         sign_url,
@@ -1303,41 +1370,6 @@ def create_supabase_signed_url(object_path: str, village: str | None = None, exp
         return None
 
 
-@app.post("/admin/officers-ui")
-def create_officer_from_ui(
-    member_id: str = Form(...),
-    member_name: str = Form(...),
-    password: str = Form(...),
-    role: str = Form(...),
-    region: str = Form(...),
-    username: str = Depends(verify_admin),
-):
-    payload = OfficerCreate(
-        member_id=member_id,
-        member_name=member_name,
-        password=password,
-        role=role,
-        region=region
-    )
-    try:
-        create_officer(payload, _=True)
-    except HTTPException as e:
-        return HTMLResponse(f"<h3>Gagal mendaftarkan petugas: {e.detail}</h3><p><a href='/admin'>Kembali</a></p>", status_code=e.status_code)
-    return RedirectResponse(url="/admin", status_code=303)
-
-
-@app.post("/admin/officers/{member_id}/deactivate-ui")
-def deactivate_officer_from_ui(
-    member_id: str,
-    username: str = Depends(verify_admin),
-):
-    try:
-        deactivate_officer(member_id, _=True)
-    except HTTPException as e:
-        return HTMLResponse(f"<h3>Gagal menonaktifkan petugas: {e.detail}</h3><p><a href='/admin'>Kembali</a></p>", status_code=e.status_code)
-    return RedirectResponse(url="/admin", status_code=303)
-
-
 @app.post("/admin/surveys/{survey_id}/delete")
 def delete_survey_from_admin(
     survey_id: int,
@@ -1348,11 +1380,7 @@ def delete_survey_from_admin(
     except HTTPException as exc:
         message = escape(str(exc.detail))
         return HTMLResponse(
-            content=(
-                "<h2>Penghapusan gagal</h2>"
-                f"<p>{message}</p>"
-                '<p><a href="/admin">Kembali ke dashboard</a></p>'
-            ),
+            content=f"<h2>Penghapusan gagal</h2><p>{message}</p><p><a href='/admin'>Kembali ke dashboard</a></p>",
             status_code=exc.status_code,
         )
     return RedirectResponse(url="/admin", status_code=303)
@@ -1363,25 +1391,12 @@ def admin_dashboard(
     username: str = Depends(verify_admin),
 ):
     with get_db() as connection:
-        rows = connection.execute(
-            "SELECT * FROM surveys ORDER BY id DESC"
-        ).fetchall()
+        rows = connection.execute("SELECT * FROM surveys ORDER BY id DESC").fetchall()
         media_rows = connection.execute(
-            """SELECT m.*, s.village FROM survey_media m 
-               JOIN surveys s ON m.survey_id = s.id ORDER BY m.id DESC"""
+            "SELECT id, survey_id, member_id, object_path, content_type, original_filename, file_size, uploaded_at, media_category FROM survey_media ORDER BY id DESC"
         ).fetchall()
-        verification_rows = connection.execute(
-            "SELECT * FROM survey_verifications ORDER BY id DESC"
-        ).fetchall()
-        verification_media_rows = connection.execute(
-            """SELECT vm.*, s.village FROM verification_media vm 
-               JOIN surveys s ON vm.survey_id = s.id ORDER BY vm.id DESC"""
-        ).fetchall()
-        
-        officer_rows = connection.execute(
-            """SELECT member_id, member_name, role, region, active, created_at 
-               FROM officers ORDER BY role, region, member_id"""
-        ).fetchall()
+        verification_rows = connection.execute("SELECT * FROM survey_verifications ORDER BY id DESC").fetchall()
+        verification_media_rows = connection.execute("SELECT * FROM verification_media ORDER BY id DESC").fetchall()
 
     verification_by_survey = {row["survey_id"]: row for row in verification_rows}
     verification_media_by_survey = {}
@@ -1392,38 +1407,16 @@ def admin_dashboard(
     for media in media_rows:
         media_by_survey.setdefault(media["survey_id"], []).append(media)
 
-    officer_table_rows = ""
-    for off in officer_rows:
-        status_badge = '<span style="color: #16a34a; font-weight: bold;">Aktif</span>' if off["active"] == 1 else '<span style="color: #dc2626; font-weight: bold;">Nonaktif</span>'
-        action_btn = (
-            f'<form method="post" action="/admin/officers/{off["member_id"]}/deactivate-ui" onsubmit="return confirm(\'Nonaktifkan petugas {off["member_id"]}?\');">'
-            f'<button type="submit" class="delete-button" style="padding: 4px 8px; font-size: 12px;">Nonaktifkan</button></form>'
-            if off["active"] == 1 else '-'
-        )
-        officer_table_rows += f"""
-        <tr>
-            <td>{escape(str(off['member_id']))}</td>
-            <td>{escape(str(off['member_name']))}</td>
-            <td><strong>{escape(str(off['role']))}</strong></td>
-            <td>{escape(str(off['region']))}</td>
-            <td>{status_badge}</td>
-            <td>{action_btn}</td>
-        </tr>
-        """
-    if not officer_table_rows:
-        officer_table_rows = '<tr><td colspan="6">Belum ada data petugas terdaftar.</td></tr>'
-
     table_rows = ""
     for row in rows:
         survey_id = row["id"]
-        village = row.get("village", "")
         lat = row["latitude"]
         lon = row["longitude"]
         map_url = f"https://www.google.com/maps?q={lat},{lon}"
 
         media_html = []
         for media in media_by_survey.get(survey_id, []):
-            signed_url = create_supabase_signed_url(media["object_path"], village)
+            signed_url = create_supabase_signed_url(media["object_path"])
             filename = escape(str(media["original_filename"] or "Media"))
             media_category = escape(str(media.get("media_category") or "business_photo"))
             category_labels = {
@@ -1454,10 +1447,10 @@ def admin_dashboard(
                 else:
                     media_html.append(f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>')
             else:
-                media_html.append(f'<span>{filename} (tersimpan, pratinjau gagal dibuat)</span>')
+                media_html.append(f'<span>{filename} (tersimpan)</span>')
                 
         for media in verification_media_by_survey.get(survey_id, []):
-            signed_url = create_supabase_signed_url(media["object_path"], village)
+            signed_url = create_supabase_signed_url(media["object_path"])
             filename = escape(str(media.get("original_filename") or "Foto verifikasi"))
             if signed_url:
                 safe_url = escape(signed_url, quote=True)
@@ -1468,7 +1461,7 @@ def admin_dashboard(
                     f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a></div>'
                 )
             else:
-                media_html.append(f'<span>{filename} (pratinjau gagal dibuat)</span>')
+                media_html.append(f'<span>{filename}</span>')
                 
         media_cell = "<br>".join(media_html) if media_html else '<span class="muted">Belum ada media</span>'
         verification_row = verification_by_survey.get(survey_id)
@@ -1484,7 +1477,7 @@ def admin_dashboard(
             needs_summary = "\n".join(
                 f"- {item.get('item_name', 'Item')}: {item.get('quantity', 0)} {item.get('unit', 'unit')} x Rp {item.get('unit_price', 0):,.0f}"
                 for item in needs
-            ) or "Tidak ada item kebutuhan yang dicatat"
+            ) or "Tidak ada item kebutuhan"
 
         detail_text = "\n".join([
             f"Pemohon: {row.get('applicant_name') or '-'}",
@@ -1535,7 +1528,7 @@ def admin_dashboard(
         table_rows += f"""
         <tr>
             <td>{survey_id}</td>
-            <td>{escape(str(row['member_id']))}<br><small><b>Desa:</b> {escape(str(village))}</small></td>
+            <td>{escape(str(row['member_id']))}<br><small><b>Desa:</b> {escape(str(row.get('village', '-')))}</small></td>
             <td class="notes">{escape(detail_text)}</td>
             <td>{lat}<br>{lon}<br><a href="{map_url}" target="_blank" rel="noopener noreferrer">Lihat Peta</a></td>
             <td>{escape(str(row['surveyed_at']))}</td>
@@ -1562,16 +1555,15 @@ def admin_dashboard(
         <title>Dashboard Survei GPS Multi-Desa</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f1f5f9; color: #1e293b; }}
-            h1, h2 {{ margin-bottom: 8px; color: #0f172a; }}
+            h1 {{ margin-bottom: 8px; }}
             .info {{ margin-bottom: 20px; color: #475569; }}
-            .card {{ background: white; padding: 20px; border-radius: 10px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-            .form-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px; }}
-            input, select {{ padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; width: 100%; box-sizing: border-box; }}
-            button.btn-primary {{ background: #0284c7; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            button.btn-primary:hover {{ background: #0369a1; }}
-            .table-wrap {{ overflow-x: auto; margin-top: 10px; }}
-            table {{ border-collapse: collapse; width: 100%; background: white; font-size: 14px; border-radius: 8px; overflow: hidden; }}
-            th, td {{ border: 1px solid #e2e8f0; padding: 10px 12px; text-align: left; vertical-align: top; }}
+            .card {{ background: white; padding: 18px; border-radius: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }}
+            .btn-export {{ background: #16a34a; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }}
+            .btn-export-pdf {{ background: #0284c7; }}
+            .btn-export:hover {{ opacity: 0.9; }}
+            .table-wrap {{ overflow-x: auto; }}
+            table {{ border-collapse: collapse; width: 100%; background: white; font-size: 14px; }}
+            th, td {{ border: 1px solid #e2e8f0; padding: 10px; text-align: left; vertical-align: top; }}
             th {{ background: #e2e8f0; white-space: nowrap; }}
             tr:nth-child(even) {{ background: #f8fafc; }}
             a {{ color: #0369a1; font-weight: bold; }}
@@ -1581,65 +1573,37 @@ def admin_dashboard(
             .media-video {{ display: block; width: 220px; max-width: 100%; margin: 4px 0; }}
             small {{ display: block; color: #64748b; margin-bottom: 8px; }}
             .muted {{ color: #64748b; }}
-            .delete-button {{ background: #b91c1c; color: #fff; border: 0; border-radius: 5px; padding: 6px 10px; cursor: pointer; }}
+            .delete-button {{ background: #b91c1c; color: #fff; border: 0; border-radius: 5px; padding: 8px 10px; cursor: pointer; }}
             .delete-button:hover {{ background: #991b1b; }}
             form {{ margin: 0; }}
         </style>
     </head>
     <body>
-        <h1>Dashboard Admin Multi-Desa</h1>
-        <div class="info">Sistem Multi-Desa Aktif (Aur Sati & Balam Jaya). Data diperbarui otomatis setiap 60 detik.</div>
+        <h1>Dashboard Survei GPS Multi-Desa</h1>
+        <div class="info">Sistem siap menangani 18+ desa secara fleksibel. Data diperbarui otomatis setiap 60 detik.</div>
         
-        <!-- PANEL MANAJEMEN PETUGAS -->
         <div class="card">
-            <h2>Tambah Petugas Baru (DPSS / DPS)</h2>
-            <form action="/admin/officers-ui" method="post" class="form-grid">
-                <input type="text" name="member_id" placeholder="ID Petugas (Cth: AUR001)" required>
-                <input type="text" name="member_name" placeholder="Nama Lengkap Petugas" required>
-                <input type="password" name="password" placeholder="Kata Sandi (Min 10 karakter)" required>
-                <select name="role" required>
-                    <option value="DPSS">DPSS (Pembuat Survei)</option>
-                    <option value="DPS">DPS (Verifikator)</option>
-                </select>
-                <input type="text" name="region" placeholder="Wilayah / Desa (Cth: Aur Sati)" required>
-                <button type="submit" class="btn-primary">Simpan Petugas</button>
-            </form>
-
-            <h3 style="margin-top: 24px;">Daftar Petugas Terdaftar</h3>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID Petugas</th>
-                            <th>Nama</th>
-                            <th>Role</th>
-                            <th>Wilayah / Desa</th>
-                            <th>Status</th>
-                            <th>Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {officer_table_rows}
-                    </tbody>
-                </table>
+            <div>
+                <strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; 
+                <strong>Total file media:</strong> {len(media_rows) + len(verification_media_rows)} &nbsp; | &nbsp; 
+                <strong>Total verifikasi:</strong> {len(verification_rows)}
+            </div>
+            <div>
+                <a href="/admin/export/excel" class="btn-export">📊 Ekspor Excel (.csv)</a>
+                <a href="/admin/export/pdf" target="_blank" class="btn-export btn-export-pdf">📄 Cetak Laporan / PDF</a>
             </div>
         </div>
 
-        <!-- PANEL DATA SURVEI -->
-        <div class="card">
-            <h2>Data Survei Masuk</h2>
-            <p><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows) + len(verification_media_rows)} &nbsp; | &nbsp; <strong>Total hasil verifikasi:</strong> {len(verification_rows)}</p>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th><th>Anggota & Desa</th><th>Data Pemohon, Usaha & Bantuan</th>
-                            <th>Lokasi GPS</th><th>Waktu Survei</th><th>Dokumen / Foto / Video</th><th>Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody>{table_rows}</tbody>
-                </table>
-            </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>ID Anggota & Desa</th><th>Data Pemohon, Usaha & Bantuan</th>
+                        <th>Lokasi GPS</th><th>Waktu Survei</th><th>Dokumen / Foto / Video</th><th>Aksi</th>
+                    </tr>
+                </thead>
+                <tbody>{table_rows}</tbody>
+            </table>
         </div>
     </body>
     </html>
