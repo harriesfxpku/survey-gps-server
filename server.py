@@ -15,6 +15,7 @@ from urllib.parse import quote
 from fastapi import Request, Header
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from fastapi import Security
@@ -195,6 +196,46 @@ def initialize_database():
                 token_hash VARCHAR(64) UNIQUE NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        # Data verifikasi dipisahkan dari survei awal agar data DPSS tidak tertimpa.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS survey_verifications (
+                id BIGSERIAL PRIMARY KEY,
+                survey_id BIGINT NOT NULL UNIQUE REFERENCES surveys(id) ON DELETE CASCADE,
+                verifier_id VARCHAR(50) NOT NULL,
+                verifier_name VARCHAR(100) NOT NULL,
+                verifier_region VARCHAR(150) NOT NULL DEFAULT '',
+                decision VARCHAR(40) NOT NULL CHECK (decision IN ('Sudah diverifikasi', 'Ditolak')),
+                business_condition TEXT NOT NULL DEFAULT '',
+                actual_business_activity TEXT NOT NULL DEFAULT '',
+                existing_assets TEXT NOT NULL DEFAULT '',
+                needs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                working_capital_details TEXT NOT NULL DEFAULT '',
+                verified_turnover DOUBLE PRECISION,
+                verified_profit DOUBLE PRECISION,
+                verified_worker_count INTEGER,
+                data_match VARCHAR(40) NOT NULL DEFAULT '',
+                discrepancy_notes TEXT NOT NULL DEFAULT '',
+                verification_notes TEXT NOT NULL DEFAULT '',
+                rejection_reason TEXT NOT NULL DEFAULT '',
+                latitude DOUBLE PRECISION NOT NULL,
+                longitude DOUBLE PRECISION NOT NULL,
+                accuracy DOUBLE PRECISION,
+                verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                total_needs_amount DOUBLE PRECISION NOT NULL DEFAULT 0
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS verification_media (
+                id BIGSERIAL PRIMARY KEY,
+                survey_id BIGINT NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
+                verifier_id VARCHAR(50) NOT NULL,
+                object_path TEXT NOT NULL UNIQUE,
+                content_type VARCHAR(100) NOT NULL,
+                original_filename TEXT,
+                file_size BIGINT NOT NULL,
+                uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
 
@@ -465,6 +506,34 @@ class MemberCreate(BaseModel):
     )
 
 
+class AssistanceNeedItem(BaseModel):
+    item_name: str = Field(min_length=1, max_length=200)
+    specification: str = Field(default="", max_length=1000)
+    quantity: float = Field(gt=0, le=1000000)
+    unit: str = Field(default="unit", max_length=40)
+    unit_price: float = Field(ge=0, le=1000000000000)
+    notes: str = Field(default="", max_length=1000)
+
+
+class VerificationCreate(BaseModel):
+    decision: str
+    business_condition: str = Field(default="", max_length=3000)
+    actual_business_activity: str = Field(default="", max_length=3000)
+    existing_assets: str = Field(default="", max_length=3000)
+    needs: list[AssistanceNeedItem] = Field(default_factory=list, max_length=50)
+    working_capital_details: str = Field(default="", max_length=3000)
+    verified_turnover: float | None = Field(default=None, ge=0)
+    verified_profit: float | None = Field(default=None, ge=0)
+    verified_worker_count: int | None = Field(default=None, ge=0, le=100000)
+    data_match: str = Field(default="", max_length=40)
+    discrepancy_notes: str = Field(default="", max_length=3000)
+    verification_notes: str = Field(default="", max_length=3000)
+    rejection_reason: str = Field(default="", max_length=3000)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: float | None = Field(default=None, ge=0)
+
+
 class SurveyCreate(BaseModel):
     member_id: str = Field(
         min_length=1,
@@ -619,6 +688,8 @@ def create_survey(
     survey: SurveyCreate,
     identity: dict = Depends(get_request_identity),
 ):
+    if identity["auth_type"] == "officer" and identity.get("role") != "DPSS":
+        raise HTTPException(status_code=403, detail="Akun DPS menggunakan menu verifikasi, bukan membuat survei awal.")
     member_id = (identity["member_id"] if identity["auth_type"] == "officer" else survey.member_id).strip()
 
     with get_db() as connection:
@@ -725,6 +796,182 @@ def list_surveys(
 # UNGGAH FOTO DAN VIDEO SURVEI
 # =========================================================
 
+def require_dps(identity: dict = Depends(get_officer_identity)):
+    if identity.get("role") != "DPS":
+        raise HTTPException(status_code=403, detail="Fitur ini khusus akun petugas DPS.")
+    return identity
+
+
+@app.get("/dps/surveys")
+def list_surveys_for_verification(
+    include_completed: bool = False,
+    identity: dict = Depends(require_dps),
+):
+    """Daftar survei awal yang dapat dibuka petugas DPS untuk verifikasi."""
+    with get_db() as connection:
+        if include_completed:
+            rows = connection.execute(
+                "SELECT * FROM surveys ORDER BY id DESC"
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """SELECT * FROM surveys
+                   WHERE COALESCE(verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')
+                   ORDER BY id DESC"""
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/dps/surveys/{survey_id}")
+def get_survey_for_verification(
+    survey_id: int,
+    identity: dict = Depends(require_dps),
+):
+    with get_db() as connection:
+        survey = connection.execute("SELECT * FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+        if survey is None:
+            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+        original_media = connection.execute(
+            """SELECT id, media_category, content_type, original_filename, object_path, file_size, uploaded_at
+               FROM survey_media WHERE survey_id = %s ORDER BY id""", (survey_id,)
+        ).fetchall()
+        verification = connection.execute(
+            "SELECT * FROM survey_verifications WHERE survey_id = %s", (survey_id,)
+        ).fetchone()
+        verification_media = connection.execute(
+            """SELECT id, content_type, original_filename, object_path, file_size, uploaded_at
+               FROM verification_media WHERE survey_id = %s ORDER BY id""", (survey_id,)
+        ).fetchall()
+
+    def media_with_url(row):
+        item = dict(row)
+        item["signed_url"] = create_supabase_signed_url(item["object_path"])
+        return item
+
+    return {
+        "survey": dict(survey),
+        "survey_media": [media_with_url(row) for row in original_media],
+        "verification": dict(verification) if verification else None,
+        "verification_media": [media_with_url(row) for row in verification_media],
+    }
+
+
+@app.post("/dps/surveys/{survey_id}/verification-media")
+async def upload_verification_media(
+    survey_id: int,
+    file: UploadFile = File(...),
+    identity: dict = Depends(require_dps),
+):
+    content_type = (file.content_type or "").lower()
+    extensions = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    if content_type not in extensions:
+        raise HTTPException(status_code=400, detail="Bukti verifikasi harus berupa foto JPEG, PNG, atau WebP.")
+    content = await file.read(20 * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="File foto kosong.")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Ukuran setiap foto verifikasi maksimal 20 MB.")
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
+    with get_db() as connection:
+        survey = connection.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+        if survey is None:
+            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+        count = connection.execute("SELECT COUNT(*) AS total FROM verification_media WHERE survey_id = %s", (survey_id,)).fetchone()["total"]
+        if count >= 5:
+            raise HTTPException(status_code=400, detail="Maksimal 5 foto bukti verifikasi per survei.")
+
+    object_path = f"verifications/{survey_id}/{uuid.uuid4().hex}{extensions[content_type]}"
+    storage_url = f"{supabase_url}/storage/v1/object/survey-media/{quote(object_path, safe='/')}"
+    request = urllib.request.Request(storage_url, data=content, headers={
+        "Authorization": f"Bearer {supabase_key}", "apikey": supabase_key,
+        "Content-Type": content_type, "x-upsert": "false",
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            if response.status not in (200, 201):
+                raise HTTPException(status_code=502, detail="Supabase gagal menyimpan foto verifikasi.")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(f"Supabase verification upload error: HTTP {exc.code}; {body[:500]}", flush=True)
+        raise HTTPException(status_code=502, detail=f"Supabase menolak foto verifikasi (HTTP {exc.code}).") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail="Supabase tidak dapat dijangkau saat mengunggah foto verifikasi.") from exc
+
+    with get_db() as connection:
+        connection.execute(
+            """INSERT INTO verification_media (survey_id, verifier_id, object_path, content_type, original_filename, file_size)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (survey_id, identity["member_id"], object_path, content_type, os.path.basename(file.filename or "foto-verifikasi"), len(content)),
+        )
+    return {"message": "Foto verifikasi berhasil diunggah.", "survey_id": survey_id, "file_path": object_path}
+
+
+@app.post("/dps/surveys/{survey_id}/verification")
+def submit_survey_verification(
+    survey_id: int,
+    payload: VerificationCreate,
+    identity: dict = Depends(require_dps),
+):
+    decision = payload.decision.strip()
+    if decision not in {"Sudah diverifikasi", "Ditolak"}:
+        raise HTTPException(status_code=422, detail="Pilihan keputusan hanya 'Sudah diverifikasi' atau 'Ditolak'.")
+    if decision == "Ditolak" and not payload.rejection_reason.strip():
+        raise HTTPException(status_code=422, detail="Alasan penolakan wajib diisi.")
+    if not payload.business_condition.strip():
+        raise HTTPException(status_code=422, detail="Kondisi nyata usaha wajib diisi.")
+    if not payload.actual_business_activity.strip():
+        raise HTTPException(status_code=422, detail="Aktivitas usaha aktual wajib diisi.")
+    if not payload.data_match:
+        raise HTTPException(status_code=422, detail="Kesesuaian data survei awal wajib dipilih.")
+    if not payload.needs:
+        raise HTTPException(status_code=422, detail="Tambahkan minimal satu item kebutuhan UMKM yang terperinci.")
+    if payload.data_match and payload.data_match not in {"Sesuai", "Sebagian sesuai", "Tidak sesuai"}:
+        raise HTTPException(status_code=422, detail="Kesesuaian data harus Sesuai, Sebagian sesuai, atau Tidak sesuai.")
+    needs_data = [item.dict() for item in payload.needs]
+    total_needs_amount = round(sum(item["quantity"] * item["unit_price"] for item in needs_data), 2)
+    with get_db() as connection:
+        survey = connection.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+        if survey is None:
+            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+        existing = connection.execute("SELECT id FROM survey_verifications WHERE survey_id = %s", (survey_id,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="Survei ini sudah memiliki hasil verifikasi. Data awal dan hasil verifikasi tidak ditimpa.")
+        connection.execute(
+            """INSERT INTO survey_verifications (
+                survey_id, verifier_id, verifier_name, verifier_region, decision,
+                business_condition, actual_business_activity, existing_assets, needs,
+                working_capital_details, verified_turnover, verified_profit, verified_worker_count,
+                data_match, discrepancy_notes, verification_notes, rejection_reason,
+                latitude, longitude, accuracy, total_needs_amount
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )""",
+            (
+                survey_id, identity["member_id"], identity["member_name"], identity["region"], decision,
+                payload.business_condition.strip(), payload.actual_business_activity.strip(), payload.existing_assets.strip(),
+                Jsonb(needs_data), payload.working_capital_details.strip(), payload.verified_turnover,
+                payload.verified_profit, payload.verified_worker_count, payload.data_match.strip(),
+                payload.discrepancy_notes.strip(), payload.verification_notes.strip(), payload.rejection_reason.strip(),
+                payload.latitude, payload.longitude, payload.accuracy, total_needs_amount,
+            ),
+        )
+        connection.execute(
+            """UPDATE surveys SET business_verified = %s, verification_status = %s, verification_notes = %s WHERE id = %s""",
+            ("Ya" if decision == "Sudah diverifikasi" else "Tidak", decision,
+             payload.verification_notes.strip() or payload.rejection_reason.strip(), survey_id),
+        )
+    return {
+        "message": "Hasil verifikasi berhasil disimpan.",
+        "survey_id": survey_id,
+        "decision": decision,
+        "verifier_id": identity["member_id"],
+        "total_needs_amount": total_needs_amount,
+    }
+
+
 @app.post("/surveys/{survey_id}/media")
 async def upload_survey_media(
     survey_id: int,
@@ -734,6 +981,8 @@ async def upload_survey_media(
     identity: dict = Depends(get_request_identity),
 ):
     if identity["auth_type"] == "officer":
+        if identity.get("role") != "DPSS":
+            raise HTTPException(status_code=403, detail="Akun DPS mengunggah bukti melalui menu verifikasi.")
         if member_id.strip().upper() != identity["member_id"].upper():
             raise HTTPException(status_code=403, detail="Petugas hanya boleh mengunggah media untuk surveinya sendiri.")
         member_id = identity["member_id"]
@@ -933,8 +1182,12 @@ def delete_survey_record(survey_id: int):
             "SELECT object_path FROM survey_media WHERE survey_id = %s",
             (survey_id,),
         ).fetchall()
+        verification_media_rows = connection.execute(
+            "SELECT object_path FROM verification_media WHERE survey_id = %s",
+            (survey_id,),
+        ).fetchall()
 
-    object_paths = [row["object_path"] for row in media_rows]
+    object_paths = [row["object_path"] for row in media_rows + verification_media_rows]
 
     if object_paths:
         supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
@@ -984,6 +1237,10 @@ def delete_survey_record(survey_id: int):
     with get_db() as connection:
         connection.execute(
             "DELETE FROM survey_media WHERE survey_id = %s",
+            (survey_id,),
+        )
+        connection.execute(
+            "DELETE FROM verification_media WHERE survey_id = %s",
             (survey_id,),
         )
         result = connection.execute(
@@ -1133,6 +1390,17 @@ def admin_dashboard(
             ORDER BY id DESC
             """
         ).fetchall()
+        verification_rows = connection.execute(
+            "SELECT * FROM survey_verifications ORDER BY id DESC"
+        ).fetchall()
+        verification_media_rows = connection.execute(
+            "SELECT * FROM verification_media ORDER BY id DESC"
+        ).fetchall()
+
+    verification_by_survey = {row["survey_id"]: row for row in verification_rows}
+    verification_media_by_survey = {}
+    for media in verification_media_rows:
+        verification_media_by_survey.setdefault(media["survey_id"], []).append(media)
 
     media_by_survey = {}
     for media in media_rows:
@@ -1183,7 +1451,33 @@ def admin_dashboard(
                 media_html.append(
                     f'<span>{filename} (tersimpan, pratinjau gagal dibuat)</span>'
                 )
+        for media in verification_media_by_survey.get(survey_id, []):
+            signed_url = create_supabase_signed_url(media["object_path"])
+            filename = escape(str(media.get("original_filename") or "Foto verifikasi"))
+            if signed_url:
+                safe_url = escape(signed_url, quote=True)
+                media_html.append(
+                    f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+                    f'<img class="media-thumb" src="{safe_url}" alt="{filename}"></a>'
+                    f'<div><strong>Foto Verifikasi DPS</strong><br>'
+                    f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a></div>'
+                )
+            else:
+                media_html.append(f'<span>{filename} (pratinjau gagal dibuat)</span>')
         media_cell = "<br>".join(media_html) if media_html else '<span class="muted">Belum ada media</span>'
+        verification_row = verification_by_survey.get(survey_id)
+        needs_summary = "-"
+        if verification_row:
+            needs = verification_row.get("needs") or []
+            if isinstance(needs, str):
+                try:
+                    needs = json.loads(needs)
+                except ValueError:
+                    needs = []
+            needs_summary = "\n".join(
+                f"- {item.get('item_name', 'Item')}: {item.get('quantity', 0)} {item.get('unit', 'unit')} x Rp {item.get('unit_price', 0):,.0f}"
+                for item in needs
+            ) or "Tidak ada item kebutuhan yang dicatat"
 
         detail_text = "\n".join([
             f"Pemohon: {row.get('applicant_name') or '-'}",
@@ -1210,6 +1504,25 @@ def admin_dashboard(
             f"Status verifikasi: {row.get('verification_status') or '-'}",
             f"Catatan verifikasi: {row.get('verification_notes') or '-'}",
             f"Catatan survei: {row.get('notes') or '-'}",
+            f"\n=== HASIL VERIFIKASI DPS ===",
+            f"Keputusan: {verification_row.get('decision') if verification_row else '-'}",
+            f"Petugas DPS: {verification_row.get('verifier_name') if verification_row else '-'} ({verification_row.get('verifier_id') if verification_row else '-'})",
+            f"Wilayah DPS: {verification_row.get('verifier_region') if verification_row else '-'}",
+            f"Waktu verifikasi: {verification_row.get('verified_at') if verification_row else '-'}",
+            f"Kondisi usaha: {verification_row.get('business_condition') if verification_row else '-'}",
+            f"Aktivitas usaha aktual: {verification_row.get('actual_business_activity') if verification_row else '-'}",
+            f"Aset yang sudah dimiliki: {verification_row.get('existing_assets') if verification_row else '-'}",
+            f"Rincian kebutuhan: {needs_summary}",
+            f"Total estimasi kebutuhan: Rp {verification_row.get('total_needs_amount', 0):,.0f}" if verification_row else "Total estimasi kebutuhan: -",
+            f"Rincian modal kerja: {verification_row.get('working_capital_details') if verification_row else '-'}",
+            f"Omzet terverifikasi: {verification_row.get('verified_turnover') if verification_row else '-'}",
+            f"Laba terverifikasi: {verification_row.get('verified_profit') if verification_row else '-'}",
+            f"Jumlah pekerja terverifikasi: {verification_row.get('verified_worker_count') if verification_row else '-'}",
+            f"Kesesuaian data: {verification_row.get('data_match') if verification_row else '-'}",
+            f"Perbedaan data: {verification_row.get('discrepancy_notes') if verification_row else '-'}",
+            f"Catatan verifikasi: {verification_row.get('verification_notes') if verification_row else '-'}",
+            f"Alasan penolakan: {verification_row.get('rejection_reason') if verification_row else '-'}",
+            f"GPS verifikasi: {str(verification_row.get('latitude')) + ', ' + str(verification_row.get('longitude')) if verification_row else '-'}",
         ])
         table_rows += f"""
         <tr>
@@ -1264,7 +1577,7 @@ def admin_dashboard(
     <body>
         <h1>Dashboard Survei GPS</h1>
         <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 60 detik. Pratinjau media menggunakan tautan sementara untuk bucket privat.</div>
-        <div class="card"><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows)}</div>
+        <div class="card"><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows) + len(verification_media_rows)} &nbsp; | &nbsp; <strong>Total hasil verifikasi:</strong> {len(verification_rows)}</div>
         <div class="table-wrap">
             <table>
                 <thead>
