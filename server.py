@@ -82,7 +82,35 @@ def get_supabase_config():
 
 
 # =========================================================
-# MEMBUAT TABEL DAN MEMASTIKAN ANGGOTA TES AKTIF
+# ADMIN BASIC AUTHENTICATION (Diletakkan di atas agar terbaca)
+# =========================================================
+
+admin_security = HTTPBasic()
+
+def verify_admin(
+    credentials: HTTPBasicCredentials = Depends(admin_security),
+):
+    admin_username = os.environ.get("ADMIN_USERNAME", "")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    if not admin_username or not admin_password:
+        raise HTTPException(status_code=503, detail="Login admin belum dikonfigurasi di server.")
+
+    username_ok = secrets.compare_digest(credentials.username.encode("utf-8"), admin_username.encode("utf-8"))
+    password_ok = secrets.compare_digest(credentials.password.encode("utf-8"), admin_password.encode("utf-8"))
+
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=401,
+            detail="Username atau kata sandi salah.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return credentials.username
+
+
+# =========================================================
+# MEMBUAT TABEL DAN INISIALISASI
 # =========================================================
 
 def initialize_database():
@@ -1311,31 +1339,6 @@ def delete_survey_api(
 # DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
 
-admin_security = HTTPBasic()
-
-
-def verify_admin(
-    credentials: HTTPBasicCredentials = Depends(admin_security),
-):
-    admin_username = os.environ.get("ADMIN_USERNAME", "")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "")
-
-    if not admin_username or not admin_password:
-        raise HTTPException(status_code=503, detail="Login admin belum dikonfigurasi di server.")
-
-    username_ok = secrets.compare_digest(credentials.username.encode("utf-8"), admin_username.encode("utf-8"))
-    password_ok = secrets.compare_digest(credentials.password.encode("utf-8"), admin_password.encode("utf-8"))
-
-    if not (username_ok and password_ok):
-        raise HTTPException(
-            status_code=401,
-            detail="Username atau kata sandi salah.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    return credentials.username
-
-
 def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> str | None:
     supabase_url, supabase_key, bucket_name = get_supabase_config()
     if not supabase_url or not supabase_key:
@@ -1506,7 +1509,7 @@ def admin_dashboard(
             f"Catatan survei: {row.get('notes') or '-'}",
             f"\n=== HASIL VERIFIKASI DPS ===",
             f"Keputusan: {verification_row.get('decision') if verification_row else '-'}",
-            f"Petugas DPS: {verification_row.get('verifier_name') if verification_row else '-'} ({verification_row.get('verifier_id') if verification_row else '-'})",
+            f"Petugas DPS: {verification_row.get('verifier_name') if verification_row else '-'} ({verification_row.get('verifier_id') if verification_row else '-'.strip()})",
             f"Wilayah DPS: {verification_row.get('verifier_region') if verification_row else '-'}",
             f"Waktu verifikasi: {verification_row.get('verified_at') if verification_row else '-'}",
             f"Kondisi usaha: {verification_row.get('business_condition') if verification_row else '-'}",
