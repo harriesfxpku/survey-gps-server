@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import json
 import secrets
+import hashlib
 from fastapi import UploadFile, File, Form
 
 import psycopg
@@ -11,7 +12,7 @@ import uuid
 import urllib.request
 import urllib.error
 from urllib.parse import quote
-from fastapi import Request
+from fastapi import Request, Header
 
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Depends
@@ -42,7 +43,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS",
-    version="3.0.0",
+    version="3.1.0",
 )
 
 app.add_middleware(
@@ -172,6 +173,31 @@ def initialize_database():
             "ALTER TABLE survey_media ADD COLUMN IF NOT EXISTS media_category VARCHAR(40) NOT NULL DEFAULT 'business_photo'"
         )
 
+        # Akun petugas dan sesi login ditambahkan tanpa mengubah tabel survei/media lama.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS officers (
+                id BIGSERIAL PRIMARY KEY,
+                member_id VARCHAR(50) UNIQUE NOT NULL REFERENCES members(member_id),
+                member_name VARCHAR(100) NOT NULL,
+                password_salt VARCHAR(64) NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                role VARCHAR(10) NOT NULL CHECK (role IN ('DPSS', 'DPS')),
+                region VARCHAR(150) NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS officer_sessions (
+                id BIGSERIAL PRIMARY KEY,
+                officer_id BIGINT NOT NULL REFERENCES officers(id) ON DELETE CASCADE,
+                token_hash VARCHAR(64) UNIQUE NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         # Pastikan anggota tes tersedia dan aktif.
         # Anggota lain dan data survei tidak dihapus.
         connection.execute(
@@ -219,6 +245,208 @@ def verify_api_key(
         )
 
     return True
+
+
+# =========================================================
+# AUTENTIKASI PETUGAS
+# =========================================================
+
+def _password_hash(password: str, salt_hex: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000
+    ).hex()
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def get_request_identity(
+    authorization: str | None = Header(default=None),
+    api_key: str | None = Depends(api_key_header),
+):
+    # API key lama tetap diterima untuk kompatibilitas dashboard/versi aplikasi lama.
+    if API_TOKEN and api_key and secrets.compare_digest(api_key, API_TOKEN):
+        return {"auth_type": "api_key", "role": "LEGACY_ADMIN"}
+
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            with get_db() as connection:
+                row = connection.execute(
+                    """
+                    SELECT o.member_id, o.member_name, o.role, o.region, o.active,
+                           s.expires_at
+                    FROM officer_sessions s
+                    JOIN officers o ON o.id = s.officer_id
+                    WHERE s.token_hash = %s AND s.expires_at > NOW()
+                    """,
+                    (_token_hash(token),),
+                ).fetchone()
+            if row and row["active"] == 1:
+                return {
+                    "auth_type": "officer",
+                    "member_id": row["member_id"],
+                    "member_name": row["member_name"],
+                    "role": row["role"],
+                    "region": row["region"],
+                }
+
+    raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
+
+
+def get_officer_identity(
+    authorization: str | None = Header(default=None),
+):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas.")
+    token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Token login tidak valid.")
+    with get_db() as connection:
+        row = connection.execute(
+            """
+            SELECT o.member_id, o.member_name, o.role, o.region, o.active, s.expires_at
+            FROM officer_sessions s
+            JOIN officers o ON o.id = s.officer_id
+            WHERE s.token_hash = %s AND s.expires_at > NOW()
+            """,
+            (_token_hash(token),),
+        ).fetchone()
+    if not row or row["active"] != 1:
+        raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
+    return {
+        "auth_type": "officer",
+        "member_id": row["member_id"],
+        "member_name": row["member_name"],
+        "role": row["role"],
+        "region": row["region"],
+    }
+
+
+class OfficerLogin(BaseModel):
+    member_id: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class OfficerCreate(BaseModel):
+    member_id: str = Field(min_length=2, max_length=50)
+    member_name: str = Field(min_length=2, max_length=100)
+    password: str = Field(min_length=10, max_length=200)
+    role: str
+    region: str = Field(min_length=1, max_length=150)
+
+
+@app.post("/auth/login")
+def officer_login(payload: OfficerLogin):
+    member_id = payload.member_id.strip().upper()
+    with get_db() as connection:
+        officer = connection.execute(
+            "SELECT * FROM officers WHERE member_id = %s", (member_id,)
+        ).fetchone()
+        if (
+            not officer
+            or officer["active"] != 1
+            or not secrets.compare_digest(
+                _password_hash(payload.password, officer["password_salt"]),
+                officer["password_hash"],
+            )
+        ):
+            raise HTTPException(status_code=401, detail="ID petugas atau kata sandi salah, atau akun tidak aktif.")
+        token = secrets.token_urlsafe(48)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
+        connection.execute(
+            "DELETE FROM officer_sessions WHERE expires_at <= NOW()"
+        )
+        connection.execute(
+            "INSERT INTO officer_sessions (officer_id, token_hash, expires_at) VALUES (%s, %s, %s)",
+            (officer["id"], _token_hash(token), expires_at),
+        )
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_at": expires_at.isoformat(),
+        "member_id": officer["member_id"],
+        "member_name": officer["member_name"],
+        "role": officer["role"],
+        "region": officer["region"],
+    }
+
+
+@app.get("/auth/me")
+def officer_me(identity: dict = Depends(get_officer_identity)):
+    return {key: identity[key] for key in ("member_id", "member_name", "role", "region")}
+
+
+@app.post("/auth/logout")
+def officer_logout(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Sesi login tidak ditemukan.")
+    token = authorization[7:].strip()
+    with get_db() as connection:
+        connection.execute("DELETE FROM officer_sessions WHERE token_hash = %s", (_token_hash(token),))
+    return {"message": "Berhasil keluar."}
+
+
+@app.post("/admin/officers")
+def create_officer(
+    payload: OfficerCreate,
+    _: bool = Depends(verify_api_key),
+):
+    member_id = payload.member_id.strip().upper()
+    member_name = payload.member_name.strip()
+    role = payload.role.strip().upper()
+    region = payload.region.strip()
+    if role not in {"DPSS", "DPS"}:
+        raise HTTPException(status_code=400, detail="Role harus DPSS atau DPS.")
+    salt = secrets.token_hex(16)
+    hashed = _password_hash(payload.password, salt)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as connection:
+        existing = connection.execute(
+            "SELECT member_id FROM officers WHERE member_id = %s", (member_id,)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="Akun petugas dengan ID tersebut sudah ada.")
+        connection.execute(
+            """INSERT INTO members (member_id, member_name, active, created_at)
+               VALUES (%s, %s, 1, %s)
+               ON CONFLICT (member_id) DO UPDATE SET member_name = EXCLUDED.member_name, active = 1""",
+            (member_id, member_name, now),
+        )
+        connection.execute(
+            """INSERT INTO officers (member_id, member_name, password_salt, password_hash, role, region, active)
+               VALUES (%s, %s, %s, %s, %s, %s, 1)""",
+            (member_id, member_name, salt, hashed, role, region),
+        )
+    return {"message": "Akun petugas berhasil dibuat.", "member_id": member_id, "member_name": member_name, "role": role, "region": region, "active": True}
+
+
+@app.get("/admin/officers")
+def list_officers(_: bool = Depends(verify_api_key)):
+    with get_db() as connection:
+        rows = connection.execute(
+            """SELECT member_id, member_name, role, region, active, created_at, updated_at
+               FROM officers ORDER BY role, region, member_id"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/admin/officers/{member_id}/deactivate")
+def deactivate_officer(member_id: str, _: bool = Depends(verify_api_key)):
+    with get_db() as connection:
+        result = connection.execute(
+            "UPDATE officers SET active = 0, updated_at = NOW() WHERE member_id = %s",
+            (member_id.strip().upper(),),
+        )
+        connection.execute(
+            "DELETE FROM officer_sessions WHERE officer_id IN (SELECT id FROM officers WHERE member_id = %s)",
+            (member_id.strip().upper(),),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+        connection.execute("UPDATE members SET active = 0 WHERE member_id = %s", (member_id.strip().upper(),))
+    return {"message": "Akun petugas dinonaktifkan.", "member_id": member_id.strip().upper()}
 
 
 # =========================================================
@@ -389,9 +617,9 @@ def list_members(
 @app.post("/surveys")
 def create_survey(
     survey: SurveyCreate,
-    _: bool = Depends(verify_api_key),
+    identity: dict = Depends(get_request_identity),
 ):
-    member_id = survey.member_id.strip()
+    member_id = (identity["member_id"] if identity["auth_type"] == "officer" else survey.member_id).strip()
 
     with get_db() as connection:
         member = connection.execute(
@@ -445,8 +673,9 @@ def create_survey(
                 survey.worker_count, survey.business_active.strip(),
                 survey.business_issues.strip(), survey.assistance_types.strip(),
                 survey.assistance_amount, survey.assistance_reason.strip(),
-                survey.business_verified.strip(), survey.verification_status.strip(),
-                survey.verification_notes.strip(),
+                ("Belum diverifikasi" if identity["auth_type"] == "officer" else survey.business_verified.strip()),
+                ("Perlu ditinjau" if identity["auth_type"] == "officer" else survey.verification_status.strip()),
+                ("" if identity["auth_type"] == "officer" else survey.verification_notes.strip()),
             ),
         ).fetchone()
 
@@ -502,8 +731,13 @@ async def upload_survey_media(
     member_id: str = Form(...),
     media_category: str = Form("business_photo"),
     file: UploadFile = File(...),
-    _: bool = Depends(verify_api_key),
+    identity: dict = Depends(get_request_identity),
 ):
+    if identity["auth_type"] == "officer":
+        if member_id.strip().upper() != identity["member_id"].upper():
+            raise HTTPException(status_code=403, detail="Petugas hanya boleh mengunggah media untuk surveinya sendiri.")
+        member_id = identity["member_id"]
+
     allowed_types = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
