@@ -1946,7 +1946,31 @@ def _lead_page(title, username, content):
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{_lead_e(title)} | Ikatan Persaudaraan Triple 555</title><style>
 :root{{--maroon:#5b1018;--deep:#31090e;--gold:#d8b15a;--paper:#f6f3ee;--ink:#262626;--line:#e5e0d8;--muted:#6b7280}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,var(--deep),var(--maroon));color:white;padding:24px max(16px,calc((100vw - 1400px)/2));border-bottom:4px solid var(--gold)}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:64px;height:64px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0;font-size:clamp(22px,3vw,32px)}}header p{{margin:4px 0 0;color:#f3e5d0}}.user{{margin-top:10px;color:#f3e5d0;font-size:13px}}main{{max-width:1400px;margin:auto;padding:20px 16px 40px}}.nav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}}a.btn,button{{display:inline-block;border:0;border-radius:9px;background:var(--maroon);color:white;padding:10px 14px;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}}a.gold{{background:var(--gold);color:#2b1b08}}a.light{{background:#fff;color:var(--maroon);border:1px solid var(--line)}}.panel,.metric{{background:white;border:1px solid var(--line);border-radius:13px;padding:16px;margin:12px 0;box-shadow:0 3px 12px #2b1b0808}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.metric strong{{display:block;font-size:26px;color:var(--maroon)}}.metric span{{color:var(--muted)}}.filters{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}label{{display:block;font-size:12px;font-weight:700;margin-bottom:5px}}input{{width:100%;min-height:40px;padding:8px;border:1px solid #d7d2ca;border-radius:8px;font:inherit}}.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}.tablewrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:850px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#f8f4ec;color:#5b1018;font-size:12px;white-space:nowrap}}td small{{color:var(--muted)}}.media{{display:flex;gap:8px;flex-wrap:wrap;max-width:300px}}.media img{{width:100px;height:78px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}}.media video{{width:180px;max-width:100%;border-radius:7px}}.muted{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:white;border:1px solid var(--line);border-top:4px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:var(--maroon)}}footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,var(--deep),var(--maroon));color:white;padding:24px max(16px,calc((100vw - 1400px)/2));border-bottom:4px solid var(--gold)}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:64px;height:64px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0;font-size:clamp(22px,3vw,32px)}}header p{{margin:4px 0 0;color:#f3e5d0}}.user{{margin-top:10px;color:#f3e5d0;font-size:13px}}main{{max-width:1400px;margin:auto;padding:20px 16px 40px}}.nav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}}a.btn,button{{display:inline-block;border:0;border-radius:9px;background:var(--maroon);color:white;padding:10px 14px;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}}a.gold{{background:var(--gold);color:#2b1b08}}a.light{{background:#fff;color:var(--maroon);border:1px solid var(--line)}}.panel,.metric{{background:white;border:1px solid var(--line);border-radius:13px;padding:16px;margin:12px 0;box-shadow:0 3px 12px #2b1b0808}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.metric strong{{display:block;font-size:26px;color:var(--maroon)}}.metric span{{color:var(--muted)}}.filters{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}label{{display:block;font-size:12px;font-weight:700;margin-bottom:5px}}input{{width:100%;min-height:40px;padding:8px;border:1px solid #d7d2ca;border-radius:8px;font:inherit}}.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}.tablewrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:850px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#f8f4ec;color:#5b1018;font-size:12px;white-space:nowrap}}td small{{color:var(--muted)}}.media{{display:flex;gap:8px;flex-wrap:wrap;max-width:300px}}.media img{{width:100px;height:78px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}}.media video{{width:180px;max-width:100%;border-radius:7px}}.muted{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:white;border:1px solid var(--line);border-top:4px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:var(--maroon)}}
+
+/* Galeri dokumentasi Dashboard Pimpinan */
+.lead-media-gallery{{display:grid;gap:18px;min-width:0}}
+.lead-media-section{{min-width:0}}
+.lead-media-heading{{font-size:14px;color:var(--maroon);margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line)}}
+.lead-identity-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px}}
+.lead-photo-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
+.lead-video-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px}}
+.lead-identity-item,.lead-photo-item,.lead-video-item{{min-width:0;background:#fff;border:1px solid var(--line);border-radius:11px;overflow:hidden;padding:10px}}
+.lead-media-label{{font-weight:700;font-size:12px;color:var(--maroon);margin-bottom:8px}}
+.lead-identity-item a,.lead-photo-item a{{display:flex;align-items:center;justify-content:center;background:#f8f5ef;border-radius:7px;overflow:hidden}}
+.lead-identity-image{{display:block;width:100%;height:auto;max-height:340px;object-fit:contain}}
+.lead-photo-image{{display:block;width:100%;height:190px;object-fit:cover;transition:transform .2s ease}}
+.lead-photo-item a:hover .lead-photo-image{{transform:scale(1.03)}}
+.lead-video-item video{{display:block;width:100%;max-height:320px;background:#1c1c1c;border-radius:7px}}
+.lead-media-name{{font-size:11px;color:var(--muted);overflow-wrap:anywhere;margin-top:7px}}
+.lead-media-empty,.lead-media-unavailable{{padding:12px;background:#faf8f4;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}}
+.lead-media-unavailable p{{margin:5px 0 0;overflow-wrap:anywhere}}
+.lead-media-unavailable-list{{display:grid;gap:8px}}
+.lead-media-gallery img{{cursor:zoom-in}}
+@media(max-width:700px){{.lead-photo-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:420px){{.lead-photo-grid{{grid-template-columns:1fr}}.lead-photo-image{{height:auto;max-height:280px;object-fit:contain}}}}
+
+footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
 </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
@@ -1974,29 +1998,139 @@ def _lead_filters_form(filters, base, export_prefix):
 
 
 def _lead_media_html(media_rows):
-    bits = []
+    identity_bits = []
+    photo_bits = []
+    video_bits = []
+    other_bits = []
+
+    category_labels = {
+        "applicant_ktp": "KTP Pemohon",
+        "family_card": "Kartu Keluarga",
+        "recipient_photo": "Foto Penerima",
+        "business_photo": "Foto Usaha",
+        "business_video": "Video Usaha",
+    }
+
     for media in media_rows:
         url = media.get("signed_url")
         name = _lead_e(media.get("original_filename") or "Media")
-        if not url:
-            bits.append(f"<small>{name} · pratinjau tidak tersedia</small>")
-            continue
-        safe_url = _lead_e(url)
+        category = str(
+            media.get("media_category") or "business_photo"
+        ).lower()
         ctype = str(media.get("content_type") or "").lower()
-        category = str(media.get("media_category") or "business_photo").lower()
-        category_labels = {
-            "applicant_ktp": "Foto KTP Pemohon",
-            "family_card": "Foto Kartu Keluarga",
-            "recipient_photo": "Foto Penerima",
-            "business_photo": "Foto Usaha",
-            "business_video": "Video Usaha",
-        }
-        label = _lead_e(category_labels.get(category, category.replace("_", " ").title()))
+
+        label = _lead_e(
+            category_labels.get(
+                category,
+                category.replace("_", " ").title()
+            )
+        )
+
+        if not url:
+            other_bits.append(
+                f"<div class='lead-media-unavailable'>"
+                f"<small>{label}</small>"
+                f"<p>{name} · Pratinjau tidak tersedia</p>"
+                f"</div>"
+            )
+            continue
+
+        safe_url = _lead_e(url)
+
         if ctype.startswith("image/"):
-            bits.append(f"<div><small>{label}</small><a href='{safe_url}' target='_blank' rel='noopener'><img src='{safe_url}' alt='{name}' loading='lazy'></a></div>")
+            # Dokumen identitas ditampilkan utuh, tidak dipotong.
+            is_identity = category in (
+                "applicant_ktp",
+                "family_card",
+            )
+
+            css_class = (
+                "lead-identity-item"
+                if is_identity
+                else "lead-photo-item"
+            )
+
+            image_class = (
+                "lead-identity-image"
+                if is_identity
+                else "lead-photo-image"
+            )
+
+            html = (
+                f"<div class='{css_class}'>"
+                f"<div class='lead-media-label'>{label}</div>"
+                f"<a href='{safe_url}' target='_blank' "
+                f"rel='noopener noreferrer' "
+                f"aria-label='Buka {label} ukuran penuh'>"
+                f"<img class='{image_class}' "
+                f"src='{safe_url}' alt='{name}' loading='lazy'>"
+                f"</a>"
+                f"<div class='lead-media-name'>{name}</div>"
+                f"</div>"
+            )
+
+            if is_identity:
+                identity_bits.append(html)
+            else:
+                photo_bits.append(html)
+
         elif ctype.startswith("video/"):
-            bits.append(f"<div><small>{label}</small><video controls preload='metadata' src='{safe_url}'></video></div>")
-    return "<div class='media'>" + "".join(bits) + "</div>" if bits else "<span class='muted'>Belum ada foto/video usaha</span>"
+            video_bits.append(
+                f"<div class='lead-video-item'>"
+                f"<div class='lead-media-label'>{label}</div>"
+                f"<video controls preload='metadata' "
+                f"playsinline src='{safe_url}'></video>"
+                f"<div class='lead-media-name'>{name}</div>"
+                f"</div>"
+            )
+
+    sections = []
+
+    if identity_bits:
+        sections.append(
+            "<section class='lead-media-section'>"
+            "<h4 class='lead-media-heading'>"
+            "Dokumen Identitas</h4>"
+            "<div class='lead-identity-grid'>"
+            + "".join(identity_bits) +
+            "</div></section>"
+        )
+
+    if photo_bits:
+        sections.append(
+            "<section class='lead-media-section'>"
+            "<h4 class='lead-media-heading'>"
+            "Galeri Foto Usaha</h4>"
+            "<div class='lead-photo-grid'>"
+            + "".join(photo_bits) +
+            "</div></section>"
+        )
+
+    if video_bits:
+        sections.append(
+            "<section class='lead-media-section'>"
+            "<h4 class='lead-media-heading'>"
+            "Video Survei</h4>"
+            "<div class='lead-video-grid'>"
+            + "".join(video_bits) +
+            "</div></section>"
+        )
+
+    if other_bits:
+        sections.append(
+            "<section class='lead-media-section'>"
+            "<div class='lead-media-unavailable-list'>"
+            + "".join(other_bits) +
+            "</div></section>"
+        )
+
+    if not sections:
+        return (
+            "<div class='lead-media-empty'>"
+            "Belum ada foto atau video dokumentasi.</div>"
+        )
+
+    return "<div class='lead-media-gallery'>" + "".join(sections) + "</div>"
 
 
 def _lead_report_html(rows, media_map, verification=False):
