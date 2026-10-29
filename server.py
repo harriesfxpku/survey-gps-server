@@ -50,7 +50,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS",
-    version="3.2.1-multivillage-fix1",
+    version="3.2.2-multivillage-media-fix",
 )
 
 app.add_middleware(
