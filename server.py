@@ -1960,7 +1960,7 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
         for v in ["Sudah diverifikasi", "Belum diverifikasi", "Perlu ditinjau", "Ditolak"]
     )
     export_qs = ("?" + qs) if qs else ""
-        page = f"""<!doctype html><html lang='id'>
+    page = f"""<!doctype html><html lang='id'>
 <head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Dashboard Pimpinan | Ikatan Persaudaraan Triple 555</title>
