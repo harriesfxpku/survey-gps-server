@@ -1983,10 +1983,19 @@ def _lead_media_html(media_rows):
             continue
         safe_url = _lead_e(url)
         ctype = str(media.get("content_type") or "").lower()
+        category = str(media.get("media_category") or "business_photo").lower()
+        category_labels = {
+            "applicant_ktp": "Foto KTP Pemohon",
+            "family_card": "Foto Kartu Keluarga",
+            "recipient_photo": "Foto Penerima",
+            "business_photo": "Foto Usaha",
+            "business_video": "Video Usaha",
+        }
+        label = _lead_e(category_labels.get(category, category.replace("_", " ").title()))
         if ctype.startswith("image/"):
-            bits.append(f"<a href='{safe_url}' target='_blank' rel='noopener'><img src='{safe_url}' alt='{name}' loading='lazy'></a>")
+            bits.append(f"<div><small>{label}</small><a href='{safe_url}' target='_blank' rel='noopener'><img src='{safe_url}' alt='{name}' loading='lazy'></a></div>")
         elif ctype.startswith("video/"):
-            bits.append(f"<video controls preload='metadata' src='{safe_url}'></video>")
+            bits.append(f"<div><small>{label}</small><video controls preload='metadata' src='{safe_url}'></video></div>")
     return "<div class='media'>" + "".join(bits) + "</div>" if bits else "<span class='muted'>Belum ada foto/video usaha</span>"
 
 
@@ -2011,7 +2020,7 @@ def _lead_report_html(rows, media_map, verification=False):
         headers = "<th>ID Survei</th><th>Waktu Verifikasi</th><th>Verifikator</th><th>Wilayah DPS</th><th>Pemohon / Usaha</th><th>Hasil Pemeriksaan</th><th>Rincian Kebutuhan</th><th>Foto Verifikasi</th>"
     else:
         heading = "Laporan Survei DPSS"
-        headers = "<th>ID</th><th>Waktu Survei</th><th>Petugas DPSS</th><th>Desa</th><th>Pemohon</th><th>Informasi Usaha</th><th>Modal / Omzet Awal</th><th>Foto / Video Usaha</th>"
+        headers = "<th>ID</th><th>Waktu Survei</th><th>Petugas DPSS</th><th>Desa</th><th>Pemohon</th><th>Informasi Usaha</th><th>Modal / Omzet Awal</th><th>KTP / Foto / Video Survei</th>"
     return f"<section class='panel'><h2>{heading} · {len(rows)} data</h2><div class='tablewrap'><table><thead><tr>{headers}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
 
 
@@ -2019,7 +2028,9 @@ def _lead_report_html(rows, media_map, verification=False):
 def pimpinan_laporan_survei(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
     filters = _lead_filters(request)
     rows = _lead_survey_rows(filters)
-    media = _lead_media([r["survey_id"] for r in rows], verification=False)
+    # Halaman dashboard survei menampilkan KTP bersama foto/video survei.
+    # Endpoint ekspor tidak memanggil include_identity=True, sehingga KTP tetap privat.
+    media = _lead_media([r["survey_id"] for r in rows], verification=False, include_identity=True)
     content = _lead_filters_form(filters, "/pimpinan/survei", "/pimpinan/survei/export") + _lead_report_html(rows, media, False)
     return HTMLResponse(_lead_page("Laporan Survei DPSS", username, content))
 
