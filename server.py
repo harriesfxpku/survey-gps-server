@@ -2002,7 +2002,7 @@ a{{color:inherit}}.shell{{display:grid;grid-template-columns:230px minmax(0,1fr)
 <body><div class='shell'>
 <aside class='sidebar'>
   <div class='brand-mini'>
-  <img src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/logo.png'
+  <img src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/static/logo.png'
        alt='Logo Triple 555'
        style='width:48px;height:48px;object-fit:contain;flex-shrink:0;'>
   <div>
