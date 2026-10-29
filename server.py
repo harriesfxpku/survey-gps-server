@@ -2017,7 +2017,22 @@ a{{color:inherit}}.shell{{display:grid;grid-template-columns:230px minmax(0,1fr)
 <div class='main'>
   <div class='topbar'><div class='crumb'>Portal Organisasi &nbsp;›&nbsp; Dashboard Pimpinan</div><div class='user-pill'>● &nbsp; {e(username)} &nbsp; · &nbsp; Pimpinan/Admin</div></div>
   <main class='content'>
-    <header class='hero'><div class='hero-brand'><div class='seal'>555</div><div><div class='eyebrow'>Portal resmi organisasi</div><h1>IKATAN PERSAUDARAAN TRIPLE 555</h1><p>Sistem Informasi Survei dan Verifikasi</p></div></div><div class='hero-foot'>Dashboard Pimpinan &nbsp;•&nbsp; Rekap data survei dan hasil verifikasi</div></header>
+<header class='hero'>
+  <div class='hero-brand'>
+    <img
+      src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/static/logo.png'
+      alt='Logo Ikatan Persaudaraan Triple 555'
+      style='width:76px;height:76px;object-fit:contain;flex-shrink:0;border-radius:50%;background:#fff;padding:3px;'
+    >
+    <div>
+      <div class='eyebrow'>Portal resmi organisasi</div>
+      <h1>IKATAN PERSAUDARAAN TRIPLE 555</h1>
+      <p>Sistem Informasi Survei dan Verifikasi</p>
+    </div>
+  </div>
+  <div class='hero-foot'>Dashboard Pimpinan &nbsp;•&nbsp; Rekap data survei dan hasil verifikasi</div>
+</header>
+
     <section id='ringkasan'><div class='page-title'><div><h2>Ringkasan Data</h2><p>Pantau perkembangan survei dan verifikasi dalam satu tempat.</p></div></div>
       <div class='cards'><div class='card'><span class='card-icon'>▤</span><div class='card-label'>TOTAL SURVEI</div><strong>{total:,}</strong></div><div class='card'><span class='card-icon'>✓</span><div class='card-label'>TERVERIFIKASI</div><strong>{verified:,}</strong></div><div class='card'><span class='card-icon'>◷</span><div class='card-label'>MENUNGGU</div><strong>{pending:,}</strong></div><div class='card'><span class='card-icon'>×</span><div class='card-label'>DITOLAK</div><strong>{rejected:,}</strong></div></div>
     </section>
