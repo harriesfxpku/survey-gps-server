@@ -295,7 +295,8 @@ def initialize_database():
         connection.execute("""INSERT INTO villages (village_name, district, bucket_name) VALUES
             ('Aur Sati', 'Tambang', 'Aur-Sati-Kec-Tambang'),
             ('Balam Jaya', 'Tambang', 'Balam-Jaya-Kec-Tambang')
-            ON CONFLICT (village_name) DO NOTHING""")
+            ON CONFLICT (village_name)
+            DO UPDATE SET district = EXCLUDED.district""")
         # Hanya tautkan survei lama jika nama desa cocok persis; media lama tetap di bucket survey-media.
         connection.execute("""UPDATE surveys s SET village_id = v.id FROM villages v
             WHERE s.village_id IS NULL AND LOWER(TRIM(s.village)) = LOWER(v.village_name)""")
