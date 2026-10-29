@@ -3,48 +3,69 @@ import os
 import json
 import secrets
 import hashlib
-from fastapi import UploadFile, File, Form
+import uuid
+import math
+from typing import Optional, List
+from contextlib import asynccontextmanager
 
 import psycopg
-import uvicorn
-
-import uuid
-import urllib.request
-import urllib.error
-from urllib.parse import quote
-from fastapi import Request, Header
-
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from fastapi import FastAPI, HTTPException, Depends
+from psycopg_pool import ConnectionPool
+
+import httpx
+from urllib.parse import quote
+from html import escape
+
+from fastapi import FastAPI, HTTPException, Depends, Request, Header, Form, File, UploadFile, Query
 from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
-from fastapi import Security
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from html import escape
 
 
 # =========================================================
-# KONFIGURASI
+# KONFIGURASI DAN DATABASE CONNECTION POOL
 # =========================================================
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-
 if DATABASE_URL.startswith("//"):
     DATABASE_URL = "postgresql:" + DATABASE_URL
 
 API_TOKEN = os.environ.get("API_TOKEN", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
 
 api_key_header = APIKeyHeader(
     name="X-API-Key",
     auto_error=False,
 )
 
+db_pool: Optional[ConnectionPool] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_pool
+    if DATABASE_URL:
+        db_pool = ConnectionPool(
+            conninfo=DATABASE_URL,
+            kwargs={"row_factory": dict_row},
+            min_size=2,
+            max_size=20,
+            open=True,
+        )
+        initialize_database()
+    yield
+    if db_pool:
+        db_pool.close()
+
+
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS",
-    version="3.1.0",
+    version="3.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -56,21 +77,11 @@ app.add_middleware(
 )
 
 
-# =========================================================
-# KONEKSI DATABASE
-# =========================================================
-
 def get_db():
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL belum dikonfigurasi."
-        )
-
-    return psycopg.connect(
-        DATABASE_URL,
-        row_factory=dict_row,
-        connect_timeout=15,
-    )
+    if not db_pool:
+        raise RuntimeError("DATABASE_URL belum dikonfigurasi atau pool belum aktif.")
+    with db_pool.connection() as conn:
+        yield conn
 
 
 # =========================================================
@@ -78,28 +89,31 @@ def get_db():
 # =========================================================
 
 def initialize_database():
-    with get_db() as connection:
+    if not db_pool:
+        return
 
+    with db_pool.connection() as connection:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS members (
                 id BIGSERIAL PRIMARY KEY,
                 member_id VARCHAR(50) UNIQUE NOT NULL,
                 member_name VARCHAR(100) NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            )
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
         """)
 
         connection.execute("""
             CREATE TABLE IF NOT EXISTS surveys (
                 id BIGSERIAL PRIMARY KEY,
+                idempotency_key VARCHAR(64) UNIQUE,
                 member_id VARCHAR(50) NOT NULL,
                 latitude DOUBLE PRECISION NOT NULL,
                 longitude DOUBLE PRECISION NOT NULL,
                 accuracy DOUBLE PRECISION,
                 notes TEXT NOT NULL DEFAULT '',
-                surveyed_at TEXT NOT NULL,
-                received_at TEXT NOT NULL,
+                surveyed_at TIMESTAMPTZ NOT NULL,
+                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 applicant_name TEXT NOT NULL DEFAULT '',
                 applicant_nik TEXT NOT NULL DEFAULT '',
                 applicant_phone TEXT NOT NULL DEFAULT '',
@@ -111,51 +125,22 @@ def initialize_database():
                 business_location TEXT NOT NULL DEFAULT '',
                 ownership_status TEXT NOT NULL DEFAULT '',
                 nib TEXT NOT NULL DEFAULT '',
-                capital_amount DOUBLE PRECISION,
-                turnover_amount DOUBLE PRECISION,
-                net_profit_amount DOUBLE PRECISION,
+                capital_amount NUMERIC(15, 2),
+                turnover_amount NUMERIC(15, 2),
+                net_profit_amount NUMERIC(15, 2),
                 worker_count INTEGER,
                 business_active TEXT NOT NULL DEFAULT '',
                 business_issues TEXT NOT NULL DEFAULT '',
                 assistance_types TEXT NOT NULL DEFAULT '',
-                assistance_amount DOUBLE PRECISION,
+                assistance_amount NUMERIC(15, 2),
                 assistance_reason TEXT NOT NULL DEFAULT '',
                 business_verified TEXT NOT NULL DEFAULT '',
                 verification_status TEXT NOT NULL DEFAULT '',
                 verification_notes TEXT NOT NULL DEFAULT ''
-            )
+            );
         """)
 
-        # Migrasi aman untuk database yang sudah berisi data survei lama.
-        migration_columns = {
-            "applicant_name": "TEXT NOT NULL DEFAULT ''",
-            "applicant_nik": "TEXT NOT NULL DEFAULT ''",
-            "applicant_phone": "TEXT NOT NULL DEFAULT ''",
-            "applicant_address": "TEXT NOT NULL DEFAULT ''",
-            "village": "TEXT NOT NULL DEFAULT ''",
-            "business_name": "TEXT NOT NULL DEFAULT ''",
-            "business_type": "TEXT NOT NULL DEFAULT ''",
-            "business_since": "TEXT NOT NULL DEFAULT ''",
-            "business_location": "TEXT NOT NULL DEFAULT ''",
-            "ownership_status": "TEXT NOT NULL DEFAULT ''",
-            "nib": "TEXT NOT NULL DEFAULT ''",
-            "capital_amount": "DOUBLE PRECISION",
-            "turnover_amount": "DOUBLE PRECISION",
-            "net_profit_amount": "DOUBLE PRECISION",
-            "worker_count": "INTEGER",
-            "business_active": "TEXT NOT NULL DEFAULT ''",
-            "business_issues": "TEXT NOT NULL DEFAULT ''",
-            "assistance_types": "TEXT NOT NULL DEFAULT ''",
-            "assistance_amount": "DOUBLE PRECISION",
-            "assistance_reason": "TEXT NOT NULL DEFAULT ''",
-            "business_verified": "TEXT NOT NULL DEFAULT ''",
-            "verification_status": "TEXT NOT NULL DEFAULT ''",
-            "verification_notes": "TEXT NOT NULL DEFAULT ''",
-        }
-        for column_name, column_type in migration_columns.items():
-            connection.execute(
-                f"ALTER TABLE surveys ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
-            )
+        connection.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64) UNIQUE;")
 
         connection.execute("""
             CREATE TABLE IF NOT EXISTS survey_media (
@@ -168,13 +153,10 @@ def initialize_database():
                 file_size BIGINT NOT NULL,
                 uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 media_category VARCHAR(40) NOT NULL DEFAULT 'business_photo'
-            )
+            );
         """)
-        connection.execute(
-            "ALTER TABLE survey_media ADD COLUMN IF NOT EXISTS media_category VARCHAR(40) NOT NULL DEFAULT 'business_photo'"
-        )
+        connection.execute("ALTER TABLE survey_media ADD COLUMN IF NOT EXISTS media_category VARCHAR(40) NOT NULL DEFAULT 'business_photo'")
 
-        # Akun petugas dan sesi login ditambahkan tanpa mengubah tabel survei/media lama.
         connection.execute("""
             CREATE TABLE IF NOT EXISTS officers (
                 id BIGSERIAL PRIMARY KEY,
@@ -187,8 +169,9 @@ def initialize_database():
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+            );
         """)
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS officer_sessions (
                 id BIGSERIAL PRIMARY KEY,
@@ -196,9 +179,9 @@ def initialize_database():
                 token_hash VARCHAR(64) UNIQUE NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+            );
         """)
-        # Data verifikasi dipisahkan dari survei awal agar data DPSS tidak tertimpa.
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS survey_verifications (
                 id BIGSERIAL PRIMARY KEY,
@@ -212,8 +195,8 @@ def initialize_database():
                 existing_assets TEXT NOT NULL DEFAULT '',
                 needs JSONB NOT NULL DEFAULT '[]'::jsonb,
                 working_capital_details TEXT NOT NULL DEFAULT '',
-                verified_turnover DOUBLE PRECISION,
-                verified_profit DOUBLE PRECISION,
+                verified_turnover NUMERIC(15, 2),
+                verified_profit NUMERIC(15, 2),
                 verified_worker_count INTEGER,
                 data_match VARCHAR(40) NOT NULL DEFAULT '',
                 discrepancy_notes TEXT NOT NULL DEFAULT '',
@@ -223,9 +206,10 @@ def initialize_database():
                 longitude DOUBLE PRECISION NOT NULL,
                 accuracy DOUBLE PRECISION,
                 verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                total_needs_amount DOUBLE PRECISION NOT NULL DEFAULT 0
-            )
+                total_needs_amount NUMERIC(15, 2) NOT NULL DEFAULT 0
+            );
         """)
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS verification_media (
                 id BIGSERIAL PRIMARY KEY,
@@ -236,66 +220,32 @@ def initialize_database():
                 original_filename TEXT,
                 file_size BIGINT NOT NULL,
                 uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+            );
         """)
 
-        # Pastikan anggota tes tersedia dan aktif.
-        # Anggota lain dan data survei tidak dihapus.
         connection.execute(
             """
-            INSERT INTO members (
-                member_id,
-                member_name,
-                active,
-                created_at
-            )
-            VALUES (%s, %s, 1, %s)
+            INSERT INTO members (member_id, member_name, active, created_at)
+            VALUES (%s, %s, 1, NOW())
             ON CONFLICT (member_id)
-            DO UPDATE SET
-                member_name = EXCLUDED.member_name,
-                active = 1
+            DO UPDATE SET member_name = EXCLUDED.member_name, active = 1
             """,
-            (
-                "PETUGAS001",
-                "Petugas Tes",
-                datetime.now(timezone.utc).isoformat(),
-            ),
+            ("PETUGAS001", "Petugas Tes"),
         )
 
 
-@app.on_event("startup")
-def startup_event():
-    initialize_database()
-
-
 # =========================================================
-# AUTENTIKASI
+# AUTENTIKASI DAN UTILS
 # =========================================================
 
-def verify_api_key(
-    api_key: str = Depends(api_key_header),
-):
-    if (
-        not API_TOKEN
-        or not api_key
-        or not secrets.compare_digest(api_key, API_TOKEN)
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Kunci akses tidak valid",
-        )
-
+def verify_api_key(api_key: Optional[str] = Depends(api_key_header)):
+    if not API_TOKEN or not api_key or not secrets.compare_digest(api_key, API_TOKEN):
+        raise HTTPException(status_code=401, detail="Kunci akses tidak valid")
     return True
 
 
-# =========================================================
-# AUTENTIKASI PETUGAS
-# =========================================================
-
 def _password_hash(password: str, salt_hex: str) -> str:
-    return hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000
-    ).hex()
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000).hex()
 
 
 def _token_hash(token: str) -> str:
@@ -303,27 +253,25 @@ def _token_hash(token: str) -> str:
 
 
 def get_request_identity(
-    authorization: str | None = Header(default=None),
-    api_key: str | None = Depends(api_key_header),
+    authorization: Optional[str] = Header(default=None),
+    api_key: Optional[str] = Depends(api_key_header),
+    conn=Depends(get_db)
 ):
-    # API key lama tetap diterima untuk kompatibilitas dashboard/versi aplikasi lama.
     if API_TOKEN and api_key and secrets.compare_digest(api_key, API_TOKEN):
         return {"auth_type": "api_key", "role": "LEGACY_ADMIN"}
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         if token:
-            with get_db() as connection:
-                row = connection.execute(
-                    """
-                    SELECT o.member_id, o.member_name, o.role, o.region, o.active,
-                           s.expires_at
-                    FROM officer_sessions s
-                    JOIN officers o ON o.id = s.officer_id
-                    WHERE s.token_hash = %s AND s.expires_at > NOW()
-                    """,
-                    (_token_hash(token),),
-                ).fetchone()
+            row = conn.execute(
+                """
+                SELECT o.member_id, o.member_name, o.role, o.region, o.active, s.expires_at
+                FROM officer_sessions s
+                JOIN officers o ON o.id = s.officer_id
+                WHERE s.token_hash = %s AND s.expires_at > NOW()
+                """,
+                (_token_hash(token),)
+            ).fetchone()
             if row and row["active"] == 1:
                 return {
                     "auth_type": "officer",
@@ -336,26 +284,26 @@ def get_request_identity(
     raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
 
 
-def get_officer_identity(
-    authorization: str | None = Header(default=None),
-):
+def get_officer_identity(authorization: Optional[str] = Header(default=None), conn=Depends(get_db)):
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas.")
     token = authorization[7:].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Token login tidak valid.")
-    with get_db() as connection:
-        row = connection.execute(
-            """
-            SELECT o.member_id, o.member_name, o.role, o.region, o.active, s.expires_at
-            FROM officer_sessions s
-            JOIN officers o ON o.id = s.officer_id
-            WHERE s.token_hash = %s AND s.expires_at > NOW()
-            """,
-            (_token_hash(token),),
-        ).fetchone()
+
+    row = conn.execute(
+        """
+        SELECT o.member_id, o.member_name, o.role, o.region, o.active, s.expires_at
+        FROM officer_sessions s
+        JOIN officers o ON o.id = s.officer_id
+        WHERE s.token_hash = %s AND s.expires_at > NOW()
+        """,
+        (_token_hash(token),)
+    ).fetchone()
+
     if not row or row["active"] != 1:
         raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
+
     return {
         "auth_type": "officer",
         "member_id": row["member_id"],
@@ -365,6 +313,16 @@ def get_officer_identity(
     }
 
 
+def require_dps(identity: dict = Depends(get_officer_identity)):
+    if identity.get("role") != "DPS":
+        raise HTTPException(status_code=403, detail="Fitur ini khusus akun petugas DPS.")
+    return identity
+
+
+# =========================================================
+# MODEL DATA
+# =========================================================
+
 class OfficerLogin(BaseModel):
     member_id: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=1, max_length=200)
@@ -373,36 +331,122 @@ class OfficerLogin(BaseModel):
 class OfficerCreate(BaseModel):
     member_id: str = Field(min_length=2, max_length=50)
     member_name: str = Field(min_length=2, max_length=100)
-    password: str = Field(min_length=10, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
     role: str
     region: str = Field(min_length=1, max_length=150)
 
 
+class MemberCreate(BaseModel):
+    member_id: str = Field(min_length=1, max_length=50)
+    member_name: str = Field(min_length=1, max_length=100)
+
+
+class AssistanceNeedItem(BaseModel):
+    item_name: str = Field(min_length=1, max_length=200)
+    specification: str = Field(default="", max_length=1000)
+    quantity: float = Field(gt=0, le=1000000)
+    unit: str = Field(default="unit", max_length=40)
+    unit_price: float = Field(ge=0, le=1000000000000)
+    notes: str = Field(default="", max_length=1000)
+
+
+class VerificationCreate(BaseModel):
+    decision: str
+    business_condition: str = Field(default="", max_length=3000)
+    actual_business_activity: str = Field(default="", max_length=3000)
+    existing_assets: str = Field(default="", max_length=3000)
+    needs: List[AssistanceNeedItem] = Field(default_factory=list, max_length=50)
+    working_capital_details: str = Field(default="", max_length=3000)
+    verified_turnover: Optional[float] = Field(default=None, ge=0)
+    verified_profit: Optional[float] = Field(default=None, ge=0)
+    verified_worker_count: Optional[int] = Field(default=None, ge=0, le=100000)
+    data_match: str = Field(default="", max_length=40)
+    discrepancy_notes: str = Field(default="", max_length=3000)
+    verification_notes: str = Field(default="", max_length=3000)
+    rejection_reason: str = Field(default="", max_length=3000)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: Optional[float] = Field(default=None, ge=0)
+
+
+class SurveyCreate(BaseModel):
+    idempotency_key: Optional[str] = Field(default=None, max_length=64)
+    member_id: str = Field(min_length=1, max_length=50)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: Optional[float] = Field(default=None, ge=0)
+    notes: str = Field(default="", max_length=5000)
+    surveyed_at: datetime
+    applicant_name: str = Field(default="", max_length=150)
+    applicant_nik: str = Field(default="", max_length=30)
+    applicant_phone: str = Field(default="", max_length=40)
+    applicant_address: str = Field(default="", max_length=1000)
+    village: str = Field(default="", max_length=120)
+    business_name: str = Field(default="", max_length=200)
+    business_type: str = Field(default="", max_length=150)
+    business_since: str = Field(default="", max_length=30)
+    business_location: str = Field(default="", max_length=1000)
+    ownership_status: str = Field(default="", max_length=100)
+    nib: str = Field(default="", max_length=100)
+    capital_amount: Optional[float] = Field(default=None, ge=0)
+    turnover_amount: Optional[float] = Field(default=None, ge=0)
+    net_profit_amount: Optional[float] = Field(default=None, ge=0)
+    worker_count: Optional[int] = Field(default=None, ge=0, le=100000)
+    business_active: str = Field(default="", max_length=50)
+    business_issues: str = Field(default="", max_length=3000)
+    assistance_types: str = Field(default="", max_length=1000)
+    assistance_amount: Optional[float] = Field(default=None, ge=0)
+    assistance_reason: str = Field(default="", max_length=3000)
+    business_verified: str = Field(default="", max_length=50)
+    verification_status: str = Field(default="", max_length=50)
+    verification_notes: str = Field(default="", max_length=3000)
+
+
+# =========================================================
+# HALAMAN UTAMA & HEALTH
+# =========================================================
+
+@app.get("/")
+def home():
+    return {
+        "server": "Survei GPS",
+        "status": "online",
+        "message": "Server berjalan dengan baik",
+    }
+
+
+@app.get("/health")
+def health(conn=Depends(get_db)):
+    conn.execute("SELECT 1")
+    return {
+        "status": "ok",
+        "database": "connected",
+    }
+
+
+# =========================================================
+# AUTENTIKASI OFFICERS
+# =========================================================
+
 @app.post("/auth/login")
-def officer_login(payload: OfficerLogin):
+def officer_login(payload: OfficerLogin, conn=Depends(get_db)):
     member_id = payload.member_id.strip().upper()
-    with get_db() as connection:
-        officer = connection.execute(
-            "SELECT * FROM officers WHERE member_id = %s", (member_id,)
-        ).fetchone()
-        if (
-            not officer
-            or officer["active"] != 1
-            or not secrets.compare_digest(
-                _password_hash(payload.password, officer["password_salt"]),
-                officer["password_hash"],
-            )
-        ):
-            raise HTTPException(status_code=401, detail="ID petugas atau kata sandi salah, atau akun tidak aktif.")
-        token = secrets.token_urlsafe(48)
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
-        connection.execute(
-            "DELETE FROM officer_sessions WHERE expires_at <= NOW()"
-        )
-        connection.execute(
-            "INSERT INTO officer_sessions (officer_id, token_hash, expires_at) VALUES (%s, %s, %s)",
-            (officer["id"], _token_hash(token), expires_at),
-        )
+    officer = conn.execute("SELECT * FROM officers WHERE member_id = %s", (member_id,)).fetchone()
+    if (
+        not officer
+        or officer["active"] != 1
+        or not secrets.compare_digest(_password_hash(payload.password, officer["password_salt"]), officer["password_hash"])
+    ):
+        raise HTTPException(status_code=401, detail="ID petugas atau kata sandi salah, atau akun tidak aktif.")
+
+    token = secrets.token_urlsafe(48)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
+    conn.execute("DELETE FROM officer_sessions WHERE expires_at <= NOW()")
+    conn.execute(
+        "INSERT INTO officer_sessions (officer_id, token_hash, expires_at) VALUES (%s, %s, %s)",
+        (officer["id"], _token_hash(token), expires_at)
+    )
+
     return {
         "access_token": token,
         "token_type": "Bearer",
@@ -420,194 +464,61 @@ def officer_me(identity: dict = Depends(get_officer_identity)):
 
 
 @app.post("/auth/logout")
-def officer_logout(authorization: str | None = Header(default=None)):
+def officer_logout(authorization: Optional[str] = Header(default=None), conn=Depends(get_db)):
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Sesi login tidak ditemukan.")
     token = authorization[7:].strip()
-    with get_db() as connection:
-        connection.execute("DELETE FROM officer_sessions WHERE token_hash = %s", (_token_hash(token),))
+    conn.execute("DELETE FROM officer_sessions WHERE token_hash = %s", (_token_hash(token),))
     return {"message": "Berhasil keluar."}
 
 
 @app.post("/admin/officers")
-def create_officer(
-    payload: OfficerCreate,
-    _: bool = Depends(verify_api_key),
-):
+def create_officer(payload: OfficerCreate, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
     member_id = payload.member_id.strip().upper()
     member_name = payload.member_name.strip()
     role = payload.role.strip().upper()
     region = payload.region.strip()
+
     if role not in {"DPSS", "DPS"}:
         raise HTTPException(status_code=400, detail="Role harus DPSS atau DPS.")
+
     salt = secrets.token_hex(16)
     hashed = _password_hash(payload.password, salt)
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as connection:
-        existing = connection.execute(
-            "SELECT member_id FROM officers WHERE member_id = %s", (member_id,)
-        ).fetchone()
-        if existing:
-            raise HTTPException(status_code=409, detail="Akun petugas dengan ID tersebut sudah ada.")
-        connection.execute(
-            """INSERT INTO members (member_id, member_name, active, created_at)
-               VALUES (%s, %s, 1, %s)
-               ON CONFLICT (member_id) DO UPDATE SET member_name = EXCLUDED.member_name, active = 1""",
-            (member_id, member_name, now),
-        )
-        connection.execute(
-            """INSERT INTO officers (member_id, member_name, password_salt, password_hash, role, region, active)
-               VALUES (%s, %s, %s, %s, %s, %s, 1)""",
-            (member_id, member_name, salt, hashed, role, region),
-        )
+    now = datetime.now(timezone.utc)
+
+    existing = conn.execute("SELECT member_id FROM officers WHERE member_id = %s", (member_id,)).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Akun petugas dengan ID tersebut sudah ada.")
+
+    conn.execute(
+        """INSERT INTO members (member_id, member_name, active, created_at)
+           VALUES (%s, %s, 1, %s) ON CONFLICT (member_id) DO UPDATE SET member_name = EXCLUDED.member_name, active = 1""",
+        (member_id, member_name, now)
+    )
+    conn.execute(
+        """INSERT INTO officers (member_id, member_name, password_salt, password_hash, role, region, active)
+           VALUES (%s, %s, %s, %s, %s, %s, 1)""",
+        (member_id, member_name, salt, hashed, role, region)
+    )
+
     return {"message": "Akun petugas berhasil dibuat.", "member_id": member_id, "member_name": member_name, "role": role, "region": region, "active": True}
 
 
 @app.get("/admin/officers")
-def list_officers(_: bool = Depends(verify_api_key)):
-    with get_db() as connection:
-        rows = connection.execute(
-            """SELECT member_id, member_name, role, region, active, created_at, updated_at
-               FROM officers ORDER BY role, region, member_id"""
-        ).fetchall()
+def list_officers(_: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    rows = conn.execute("SELECT member_id, member_name, role, region, active, created_at, updated_at FROM officers ORDER BY role, region, member_id").fetchall()
     return [dict(row) for row in rows]
 
 
 @app.post("/admin/officers/{member_id}/deactivate")
-def deactivate_officer(member_id: str, _: bool = Depends(verify_api_key)):
-    with get_db() as connection:
-        result = connection.execute(
-            "UPDATE officers SET active = 0, updated_at = NOW() WHERE member_id = %s",
-            (member_id.strip().upper(),),
-        )
-        connection.execute(
-            "DELETE FROM officer_sessions WHERE officer_id IN (SELECT id FROM officers WHERE member_id = %s)",
-            (member_id.strip().upper(),),
-        )
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
-        connection.execute("UPDATE members SET active = 0 WHERE member_id = %s", (member_id.strip().upper(),))
-    return {"message": "Akun petugas dinonaktifkan.", "member_id": member_id.strip().upper()}
-
-
-# =========================================================
-# MODEL DATA
-# =========================================================
-
-class MemberCreate(BaseModel):
-    member_id: str = Field(
-        min_length=1,
-        max_length=50,
-    )
-
-    member_name: str = Field(
-        min_length=1,
-        max_length=100,
-    )
-
-
-class AssistanceNeedItem(BaseModel):
-    item_name: str = Field(min_length=1, max_length=200)
-    specification: str = Field(default="", max_length=1000)
-    quantity: float = Field(gt=0, le=1000000)
-    unit: str = Field(default="unit", max_length=40)
-    unit_price: float = Field(ge=0, le=1000000000000)
-    notes: str = Field(default="", max_length=1000)
-
-
-class VerificationCreate(BaseModel):
-    decision: str
-    business_condition: str = Field(default="", max_length=3000)
-    actual_business_activity: str = Field(default="", max_length=3000)
-    existing_assets: str = Field(default="", max_length=3000)
-    needs: list[AssistanceNeedItem] = Field(default_factory=list, max_length=50)
-    working_capital_details: str = Field(default="", max_length=3000)
-    verified_turnover: float | None = Field(default=None, ge=0)
-    verified_profit: float | None = Field(default=None, ge=0)
-    verified_worker_count: int | None = Field(default=None, ge=0, le=100000)
-    data_match: str = Field(default="", max_length=40)
-    discrepancy_notes: str = Field(default="", max_length=3000)
-    verification_notes: str = Field(default="", max_length=3000)
-    rejection_reason: str = Field(default="", max_length=3000)
-    latitude: float = Field(ge=-90, le=90)
-    longitude: float = Field(ge=-180, le=180)
-    accuracy: float | None = Field(default=None, ge=0)
-
-
-class SurveyCreate(BaseModel):
-    member_id: str = Field(
-        min_length=1,
-        max_length=50,
-    )
-
-    latitude: float = Field(
-        ge=-90,
-        le=90,
-    )
-
-    longitude: float = Field(
-        ge=-180,
-        le=180,
-    )
-
-    accuracy: float | None = Field(
-        default=None,
-        ge=0,
-    )
-
-    notes: str = Field(
-        default="",
-        max_length=5000,
-    )
-
-    surveyed_at: datetime
-    applicant_name: str = Field(default="", max_length=150)
-    applicant_nik: str = Field(default="", max_length=30)
-    applicant_phone: str = Field(default="", max_length=40)
-    applicant_address: str = Field(default="", max_length=1000)
-    village: str = Field(default="", max_length=120)
-    business_name: str = Field(default="", max_length=200)
-    business_type: str = Field(default="", max_length=150)
-    business_since: str = Field(default="", max_length=30)
-    business_location: str = Field(default="", max_length=1000)
-    ownership_status: str = Field(default="", max_length=100)
-    nib: str = Field(default="", max_length=100)
-    capital_amount: float | None = Field(default=None, ge=0)
-    turnover_amount: float | None = Field(default=None, ge=0)
-    net_profit_amount: float | None = Field(default=None, ge=0)
-    worker_count: int | None = Field(default=None, ge=0, le=100000)
-    business_active: str = Field(default="", max_length=50)
-    business_issues: str = Field(default="", max_length=3000)
-    assistance_types: str = Field(default="", max_length=1000)
-    assistance_amount: float | None = Field(default=None, ge=0)
-    assistance_reason: str = Field(default="", max_length=3000)
-    business_verified: str = Field(default="", max_length=50)
-    verification_status: str = Field(default="", max_length=50)
-    verification_notes: str = Field(default="", max_length=3000)
-
-
-# =========================================================
-# HALAMAN UTAMA
-# =========================================================
-
-@app.get("/")
-def home():
-    return {
-        "server": "Survei GPS",
-        "status": "online",
-        "message": "Server berjalan dengan baik",
-    }
-
-
-@app.get("/health")
-def health():
-    with get_db() as connection:
-        connection.execute("SELECT 1")
-
-    return {
-        "status": "ok",
-        "database": "connected",
-    }
+def deactivate_officer(member_id: str, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    mid = member_id.strip().upper()
+    result = conn.execute("UPDATE officers SET active = 0, updated_at = NOW() WHERE member_id = %s", (mid,))
+    conn.execute("DELETE FROM officer_sessions WHERE officer_id IN (SELECT id FROM officers WHERE member_id = %s)", (mid,))
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+    conn.execute("UPDATE members SET active = 0 WHERE member_id = %s", (mid,))
+    return {"message": "Akun petugas dinonaktifkan.", "member_id": mid}
 
 
 # =========================================================
@@ -615,233 +526,156 @@ def health():
 # =========================================================
 
 @app.post("/admin/members")
-def create_member(
-    member: MemberCreate,
-    _: bool = Depends(verify_api_key),
-):
-    member_id = member.member_id.strip()
-    member_name = member.member_name.strip()
-
-    if not member_id or not member_name:
-        raise HTTPException(
-            status_code=400,
-            detail="ID dan nama anggota wajib diisi",
-        )
+def create_member(member: MemberCreate, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    mid = member.member_id.strip()
+    mname = member.member_name.strip()
+    if not mid or not mname:
+        raise HTTPException(status_code=400, detail="ID dan nama anggota wajib diisi")
 
     try:
-        with get_db() as connection:
-            connection.execute(
-                """
-                INSERT INTO members (
-                    member_id,
-                    member_name,
-                    created_at
-                )
-                VALUES (%s, %s, %s)
-                """,
-                (
-                    member_id,
-                    member_name,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-
-    except psycopg.errors.UniqueViolation:
-        raise HTTPException(
-            status_code=409,
-            detail="ID anggota sudah terdaftar",
+        conn.execute(
+            "INSERT INTO members (member_id, member_name, created_at) VALUES (%s, %s, NOW())",
+            (mid, mname)
         )
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail="ID anggota sudah terdaftar")
 
-    return {
-        "message": "Anggota berhasil didaftarkan",
-        "member_id": member_id,
-        "member_name": member_name,
-    }
+    return {"message": "Anggota berhasil didaftarkan", "member_id": mid, "member_name": mname}
 
 
 @app.get("/admin/members")
-def list_members(
-    _: bool = Depends(verify_api_key),
-):
-    with get_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                member_id,
-                member_name,
-                active,
-                created_at
-            FROM members
-            ORDER BY member_id
-            """
-        ).fetchall()
-
+def list_members(_: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    rows = conn.execute("SELECT member_id, member_name, active, created_at FROM members ORDER BY member_id").fetchall()
     return [dict(row) for row in rows]
 
 
 # =========================================================
-# PENGIRIMAN DATA SURVEI GPS
+# SURVEI GPS
 # =========================================================
 
 @app.post("/surveys")
-def create_survey(
-    survey: SurveyCreate,
-    identity: dict = Depends(get_request_identity),
-):
+def create_survey(survey: SurveyCreate, identity: dict = Depends(get_request_identity), conn=Depends(get_db)):
     if identity["auth_type"] == "officer" and identity.get("role") != "DPSS":
         raise HTTPException(status_code=403, detail="Akun DPS menggunakan menu verifikasi, bukan membuat survei awal.")
-    member_id = (identity["member_id"] if identity["auth_type"] == "officer" else survey.member_id).strip()
 
-    with get_db() as connection:
-        member = connection.execute(
-            """
-            SELECT member_id
-            FROM members
-            WHERE member_id = %s
-              AND active = 1
-            """,
-            (member_id,),
-        ).fetchone()
+    member_id = identity["member_id"] if identity["auth_type"] == "officer" else survey.member_id.strip()
 
-        if member is None:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "ID anggota tidak terdaftar "
-                    "atau tidak aktif"
-                ),
-            )
+    # Cek Idempotency Key
+    if survey.idempotency_key:
+        existing = conn.execute("SELECT id FROM surveys WHERE idempotency_key = %s", (survey.idempotency_key,)).fetchone()
+        if existing:
+            return {"message": "Data survei sudah tersimpan sebelumnya (idempotent).", "survey_id": existing["id"], "member_id": member_id}
 
-        row = connection.execute(
-            """
-            INSERT INTO surveys (
-                member_id, latitude, longitude, accuracy, notes,
-                surveyed_at, received_at, applicant_name, applicant_nik,
-                applicant_phone, applicant_address, village, business_name,
-                business_type, business_since, business_location, ownership_status,
-                nib, capital_amount, turnover_amount, net_profit_amount,
-                worker_count, business_active, business_issues, assistance_types,
-                assistance_amount, assistance_reason, business_verified,
-                verification_status, verification_notes
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            RETURNING id
-            """,
-            (
-                member_id, survey.latitude, survey.longitude, survey.accuracy,
-                survey.notes, survey.surveyed_at.isoformat(),
-                datetime.now(timezone.utc).isoformat(), survey.applicant_name.strip(),
-                survey.applicant_nik.strip(), survey.applicant_phone.strip(),
-                survey.applicant_address.strip(), survey.village.strip(),
-                survey.business_name.strip(), survey.business_type.strip(),
-                survey.business_since.strip(), survey.business_location.strip(),
-                survey.ownership_status.strip(), survey.nib.strip(),
-                survey.capital_amount, survey.turnover_amount, survey.net_profit_amount,
-                survey.worker_count, survey.business_active.strip(),
-                survey.business_issues.strip(), survey.assistance_types.strip(),
-                survey.assistance_amount, survey.assistance_reason.strip(),
-                ("Belum diverifikasi" if identity["auth_type"] == "officer" else survey.business_verified.strip()),
-                ("Perlu ditinjau" if identity["auth_type"] == "officer" else survey.verification_status.strip()),
-                ("" if identity["auth_type"] == "officer" else survey.verification_notes.strip()),
-            ),
-        ).fetchone()
+    member = conn.execute("SELECT member_id FROM members WHERE member_id = %s AND active = 1", (member_id,)).fetchone()
+    if member is None:
+        raise HTTPException(status_code=403, detail="ID anggota tidak terdaftar atau tidak aktif")
 
-        survey_id = row["id"]
+    row = conn.execute(
+        """
+        INSERT INTO surveys (
+            idempotency_key, member_id, latitude, longitude, accuracy, notes,
+            surveyed_at, received_at, applicant_name, applicant_nik, applicant_phone,
+            applicant_address, village, business_name, business_type, business_since,
+            business_location, ownership_status, nib, capital_amount, turnover_amount,
+            net_profit_amount, worker_count, business_active, business_issues,
+            assistance_types, assistance_amount, assistance_reason, business_verified,
+            verification_status, verification_notes
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        ) RETURNING id
+        """,
+        (
+            survey.idempotency_key, member_id, survey.latitude, survey.longitude, survey.accuracy,
+            survey.notes, survey.surveyed_at, survey.applicant_name.strip(),
+            survey.applicant_nik.strip(), survey.applicant_phone.strip(), survey.applicant_address.strip(),
+            survey.village.strip(), survey.business_name.strip(), survey.business_type.strip(),
+            survey.business_since.strip(), survey.business_location.strip(), survey.ownership_status.strip(),
+            survey.nib.strip(), survey.capital_amount, survey.turnover_amount, survey.net_profit_amount,
+            survey.worker_count, survey.business_active.strip(), survey.business_issues.strip(),
+            survey.assistance_types.strip(), survey.assistance_amount, survey.assistance_reason.strip(),
+            ("Belum diverifikasi" if identity["auth_type"] == "officer" else survey.business_verified.strip()),
+            ("Perlu ditinjau" if identity["auth_type"] == "officer" else survey.verification_status.strip()),
+            ("" if identity["auth_type"] == "officer" else survey.verification_notes.strip()),
+        )
+    ).fetchone()
 
-    return {
-        "message": "Data survei berhasil disimpan",
-        "survey_id": survey_id,
-        "member_id": member_id,
-    }
+    return {"message": "Data survei berhasil disimpan", "survey_id": row["id"], "member_id": member_id}
 
-
-# =========================================================
-# MELIHAT HASIL SURVEI
-# =========================================================
 
 @app.get("/admin/surveys")
-def list_surveys(
-    member_id: str | None = None,
-    _: bool = Depends(verify_api_key),
-):
-    with get_db() as connection:
-        if member_id:
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM surveys
-                WHERE member_id = %s
-                ORDER BY id DESC
-                """,
-                (member_id,),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT *
-                FROM surveys
-                ORDER BY id DESC
-                """
-            ).fetchall()
-
+def list_surveys(member_id: Optional[str] = None, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    if member_id:
+        rows = conn.execute("SELECT * FROM surveys WHERE member_id = %s ORDER BY id DESC", (member_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM surveys ORDER BY id DESC").fetchall()
     return [dict(row) for row in rows]
 
 
-
 # =========================================================
-# UNGGAH FOTO DAN VIDEO SURVEI
+# DPS VERIFIKASI BERBASIS WILAYAH (ISOLASI DATA)
 # =========================================================
-
-def require_dps(identity: dict = Depends(get_officer_identity)):
-    if identity.get("role") != "DPS":
-        raise HTTPException(status_code=403, detail="Fitur ini khusus akun petugas DPS.")
-    return identity
-
 
 @app.get("/dps/surveys")
 def list_surveys_for_verification(
     include_completed: bool = False,
     identity: dict = Depends(require_dps),
+    conn=Depends(get_db)
 ):
-    """Daftar survei awal yang dapat dibuka petugas DPS untuk verifikasi."""
-    with get_db() as connection:
-        if include_completed:
-            rows = connection.execute(
-                "SELECT * FROM surveys ORDER BY id DESC"
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """SELECT * FROM surveys
-                   WHERE COALESCE(verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')
-                   ORDER BY id DESC"""
-            ).fetchall()
+    region = identity.get("region", "").strip()
+    query = "SELECT * FROM surveys WHERE village ILIKE %s"
+    params = [f"%{region}%"] if region else ["%"]
+
+    if not include_completed:
+        query += " AND COALESCE(verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')"
+
+    query += " ORDER BY id DESC"
+    rows = conn.execute(query, params).fetchall()
     return [dict(row) for row in rows]
 
 
+def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> Optional[str]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/survey-media/{quote(object_path, safe='/')}"
+    payload = json.dumps({"expiresIn": expires_in}).encode("utf-8")
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(
+                sign_url,
+                content=payload,
+                headers={
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "apikey": SUPABASE_KEY,
+                    "Content-Type": "application/json",
+                }
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                signed_path = result.get("signedURL") or result.get("signedUrl")
+                if not signed_path:
+                    return None
+                if signed_path.startswith("http://") or signed_path.startswith("https://"):
+                    return signed_path
+                if signed_path.startswith("/"):
+                    if signed_path.startswith("/storage/v1/"):
+                        return f"{SUPABASE_URL}{signed_path}"
+                    return f"{SUPABASE_URL}/storage/v1{signed_path}"
+                return f"{SUPABASE_URL}/storage/v1/{signed_path.lstrip('/')}"
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/dps/surveys/{survey_id}")
-def get_survey_for_verification(
-    survey_id: int,
-    identity: dict = Depends(require_dps),
-):
-    with get_db() as connection:
-        survey = connection.execute("SELECT * FROM surveys WHERE id = %s", (survey_id,)).fetchone()
-        if survey is None:
-            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
-        original_media = connection.execute(
-            """SELECT id, media_category, content_type, original_filename, object_path, file_size, uploaded_at
-               FROM survey_media WHERE survey_id = %s ORDER BY id""", (survey_id,)
-        ).fetchall()
-        verification = connection.execute(
-            "SELECT * FROM survey_verifications WHERE survey_id = %s", (survey_id,)
-        ).fetchone()
-        verification_media = connection.execute(
-            """SELECT id, content_type, original_filename, object_path, file_size, uploaded_at
-               FROM verification_media WHERE survey_id = %s ORDER BY id""", (survey_id,)
-        ).fetchall()
+def get_survey_for_verification(survey_id: int, identity: dict = Depends(require_dps), conn=Depends(get_db)):
+    survey = conn.execute("SELECT * FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+
+    original_media = conn.execute("SELECT id, media_category, content_type, original_filename, object_path, file_size, uploaded_at FROM survey_media WHERE survey_id = %s ORDER BY id", (survey_id,)).fetchall()
+    verification = conn.execute("SELECT * FROM survey_verifications WHERE survey_id = %s", (survey_id,)).fetchone()
+    verification_media = conn.execute("SELECT id, content_type, original_filename, object_path, file_size, uploaded_at FROM verification_media WHERE survey_id = %s ORDER BY id", (survey_id,)).fetchall()
 
     def media_with_url(row):
         item = dict(row)
@@ -856,56 +690,62 @@ def get_survey_for_verification(
     }
 
 
+# =========================================================
+# ASYNC MEDIA UPLOADS (NON-BLOCKING HTTPX)
+# =========================================================
+
 @app.post("/dps/surveys/{survey_id}/verification-media")
 async def upload_verification_media(
     survey_id: int,
     file: UploadFile = File(...),
     identity: dict = Depends(require_dps),
+    conn=Depends(get_db)
 ):
     content_type = (file.content_type or "").lower()
     extensions = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
     if content_type not in extensions:
         raise HTTPException(status_code=400, detail="Bukti verifikasi harus berupa foto JPEG, PNG, atau WebP.")
-    content = await file.read(20 * 1024 * 1024 + 1)
+
+    content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="File foto kosong.")
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Ukuran setiap foto verifikasi maksimal 20 MB.")
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
-    if not supabase_url or not supabase_key:
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
-    with get_db() as connection:
-        survey = connection.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
-        if survey is None:
-            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
-        count = connection.execute("SELECT COUNT(*) AS total FROM verification_media WHERE survey_id = %s", (survey_id,)).fetchone()["total"]
-        if count >= 5:
-            raise HTTPException(status_code=400, detail="Maksimal 5 foto bukti verifikasi per survei.")
+
+    survey = conn.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+
+    count = conn.execute("SELECT COUNT(*) AS total FROM verification_media WHERE survey_id = %s", (survey_id,)).fetchone()["total"]
+    if count >= 5:
+        raise HTTPException(status_code=400, detail="Maksimal 5 foto bukti verifikasi per survei.")
 
     object_path = f"verifications/{survey_id}/{uuid.uuid4().hex}{extensions[content_type]}"
-    storage_url = f"{supabase_url}/storage/v1/object/survey-media/{quote(object_path, safe='/')}"
-    request = urllib.request.Request(storage_url, data=content, headers={
-        "Authorization": f"Bearer {supabase_key}", "apikey": supabase_key,
-        "Content-Type": content_type, "x-upsert": "false",
-    }, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            if response.status not in (200, 201):
-                raise HTTPException(status_code=502, detail="Supabase gagal menyimpan foto verifikasi.")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        print(f"Supabase verification upload error: HTTP {exc.code}; {body[:500]}", flush=True)
-        raise HTTPException(status_code=502, detail=f"Supabase menolak foto verifikasi (HTTP {exc.code}).") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=502, detail="Supabase tidak dapat dijangkau saat mengunggah foto verifikasi.") from exc
+    storage_url = f"{SUPABASE_URL}/storage/v1/object/survey-media/{quote(object_path, safe='/')}"
 
-    with get_db() as connection:
-        connection.execute(
-            """INSERT INTO verification_media (survey_id, verifier_id, object_path, content_type, original_filename, file_size)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (survey_id, identity["member_id"], object_path, content_type, os.path.basename(file.filename or "foto-verifikasi"), len(content)),
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            storage_url,
+            content=content,
+            headers={
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "apikey": SUPABASE_KEY,
+                "Content-Type": content_type,
+                "x-upsert": "false",
+            }
         )
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Supabase menolak foto verifikasi (HTTP {resp.status_code}).")
+
+    conn.execute(
+        """INSERT INTO verification_media (survey_id, verifier_id, object_path, content_type, original_filename, file_size)
+           VALUES (%s, %s, %s, %s, %s, %s)""",
+        (survey_id, identity["member_id"], object_path, content_type, os.path.basename(file.filename or "foto-verifikasi"), len(content)),
+    )
+
     return {"message": "Foto verifikasi berhasil diunggah.", "survey_id": survey_id, "file_path": object_path}
 
 
@@ -914,6 +754,7 @@ def submit_survey_verification(
     survey_id: int,
     payload: VerificationCreate,
     identity: dict = Depends(require_dps),
+    conn=Depends(get_db)
 ):
     decision = payload.decision.strip()
     if decision not in {"Sudah diverifikasi", "Ditolak"}:
@@ -928,41 +769,41 @@ def submit_survey_verification(
         raise HTTPException(status_code=422, detail="Kesesuaian data survei awal wajib dipilih.")
     if not payload.needs:
         raise HTTPException(status_code=422, detail="Tambahkan minimal satu item kebutuhan UMKM yang terperinci.")
-    if payload.data_match and payload.data_match not in {"Sesuai", "Sebagian sesuai", "Tidak sesuai"}:
-        raise HTTPException(status_code=422, detail="Kesesuaian data harus Sesuai, Sebagian sesuai, atau Tidak sesuai.")
+
     needs_data = [item.dict() for item in payload.needs]
     total_needs_amount = round(sum(item["quantity"] * item["unit_price"] for item in needs_data), 2)
-    with get_db() as connection:
-        survey = connection.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
-        if survey is None:
-            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
-        existing = connection.execute("SELECT id FROM survey_verifications WHERE survey_id = %s", (survey_id,)).fetchone()
-        if existing:
-            raise HTTPException(status_code=409, detail="Survei ini sudah memiliki hasil verifikasi. Data awal dan hasil verifikasi tidak ditimpa.")
-        connection.execute(
-            """INSERT INTO survey_verifications (
-                survey_id, verifier_id, verifier_name, verifier_region, decision,
-                business_condition, actual_business_activity, existing_assets, needs,
-                working_capital_details, verified_turnover, verified_profit, verified_worker_count,
-                data_match, discrepancy_notes, verification_notes, rejection_reason,
-                latitude, longitude, accuracy, total_needs_amount
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )""",
-            (
-                survey_id, identity["member_id"], identity["member_name"], identity["region"], decision,
-                payload.business_condition.strip(), payload.actual_business_activity.strip(), payload.existing_assets.strip(),
-                Jsonb(needs_data), payload.working_capital_details.strip(), payload.verified_turnover,
-                payload.verified_profit, payload.verified_worker_count, payload.data_match.strip(),
-                payload.discrepancy_notes.strip(), payload.verification_notes.strip(), payload.rejection_reason.strip(),
-                payload.latitude, payload.longitude, payload.accuracy, total_needs_amount,
-            ),
+
+    survey = conn.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+
+    existing = conn.execute("SELECT id FROM survey_verifications WHERE survey_id = %s", (survey_id,)).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Survei ini sudah memiliki hasil verifikasi.")
+
+    conn.execute(
+        """INSERT INTO survey_verifications (
+            survey_id, verifier_id, verifier_name, verifier_region, decision,
+            business_condition, actual_business_activity, existing_assets, needs,
+            working_capital_details, verified_turnover, verified_profit, verified_worker_count,
+            data_match, discrepancy_notes, verification_notes, rejection_reason,
+            latitude, longitude, accuracy, total_needs_amount
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (
+            survey_id, identity["member_id"], identity["member_name"], identity["region"], decision,
+            payload.business_condition.strip(), payload.actual_business_activity.strip(), payload.existing_assets.strip(),
+            Jsonb(needs_data), payload.working_capital_details.strip(), payload.verified_turnover,
+            payload.verified_profit, payload.verified_worker_count, payload.data_match.strip(),
+            payload.discrepancy_notes.strip(), payload.verification_notes.strip(), payload.rejection_reason.strip(),
+            payload.latitude, payload.longitude, payload.accuracy, total_needs_amount,
         )
-        connection.execute(
-            """UPDATE surveys SET business_verified = %s, verification_status = %s, verification_notes = %s WHERE id = %s""",
-            ("Ya" if decision == "Sudah diverifikasi" else "Tidak", decision,
-             payload.verification_notes.strip() or payload.rejection_reason.strip(), survey_id),
-        )
+    )
+
+    conn.execute(
+        "UPDATE surveys SET business_verified = %s, verification_status = %s, verification_notes = %s WHERE id = %s",
+        ("Ya" if decision == "Sudah diverifikasi" else "Tidak", decision, payload.verification_notes.strip() or payload.rejection_reason.strip(), survey_id)
+    )
+
     return {
         "message": "Hasil verifikasi berhasil disimpan.",
         "survey_id": survey_id,
@@ -979,6 +820,7 @@ async def upload_survey_media(
     media_category: str = Form("business_photo"),
     file: UploadFile = File(...),
     identity: dict = Depends(get_request_identity),
+    conn=Depends(get_db)
 ):
     if identity["auth_type"] == "officer":
         if identity.get("role") != "DPSS":
@@ -988,151 +830,52 @@ async def upload_survey_media(
         member_id = identity["member_id"]
 
     allowed_types = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "video/mp4": ".mp4",
-        "video/quicktime": ".mov",
+        "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+        "video/mp4": ".mp4", "video/quicktime": ".mov",
     }
 
     content_type = (file.content_type or "").lower()
     if content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail="Jenis file tidak diizinkan. Gunakan JPEG, PNG, WebP, MP4, atau MOV.",
-        )
+        raise HTTPException(status_code=400, detail="Jenis file tidak diizinkan. Gunakan JPEG, PNG, WebP, MP4, atau MOV.")
 
-    allowed_categories = {
-        "applicant_ktp": (1, "image"),
-        "family_card": (1, "image"),
-        "recipient_photo": (1, "image"),
-        "business_photo": (5, "image"),
-        "business_video": (1, "video"),
-    }
-    if media_category not in allowed_categories:
-        raise HTTPException(status_code=400, detail="Kategori media tidak dikenal.")
-    category_limit, category_kind = allowed_categories[media_category]
-    is_video = content_type.startswith("video/")
-    if (category_kind == "video") != is_video:
-        raise HTTPException(status_code=400, detail="Jenis file tidak sesuai kategori media.")
-
-    max_size = 200 * 1024 * 1024
-    content = await file.read(max_size + 1)
+    content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="File kosong.")
-    if len(content) > max_size:
+    if len(content) > 200 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Ukuran file maksimal 200 MB.")
 
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
-    if not supabase_url or not supabase_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Konfigurasi penyimpanan Supabase belum lengkap.",
-        )
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=503, detail="Konfigurasi penyimpanan Supabase belum lengkap.")
 
     member_id = member_id.strip()
-    with get_db() as connection:
-        survey = connection.execute(
-            """
-            SELECT id, member_id
-            FROM surveys
-            WHERE id = %s AND member_id = %s
-            """,
-            (survey_id, member_id),
-        ).fetchone()
-        category_count = connection.execute(
-            "SELECT COUNT(*) AS total FROM survey_media WHERE survey_id = %s AND media_category = %s",
-            (survey_id, media_category),
-        ).fetchone()["total"]
-
+    survey = conn.execute("SELECT id FROM surveys WHERE id = %s AND member_id = %s", (survey_id, member_id)).fetchone()
     if survey is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Data survei tidak ditemukan untuk ID anggota tersebut.",
-        )
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan untuk ID anggota tersebut.")
 
-    if category_count >= category_limit:
-        label = {
-            "applicant_ktp": "foto KTP",
-            "family_card": "foto KK",
-            "recipient_photo": "foto penerima bantuan",
-            "business_photo": "foto dokumentasi usaha (maksimal 5)",
-            "business_video": "video usaha",
-        }[media_category]
-        raise HTTPException(status_code=400, detail=f"Batas {label} sudah tercapai.")
-
-    # Nama objek dibuat oleh server dan dikelompokkan per kategori.
     object_path = f"surveys/{survey_id}/{media_category}/{uuid.uuid4().hex}{allowed_types[content_type]}"
-    storage_url = (
-        f"{supabase_url}/storage/v1/object/survey-media/"
-        f"{quote(object_path, safe='/')}"
-    )
-    request = urllib.request.Request(
-        storage_url,
-        data=content,
-        headers={
-            "Authorization": f"Bearer {supabase_key}",
-            "apikey": supabase_key,
-            "Content-Type": content_type,
-            "x-upsert": "false",
-        },
-        method="POST",
-    )
+    storage_url = f"{SUPABASE_URL}/storage/v1/object/survey-media/{quote(object_path, safe='/')}"
 
-    try:
-        with urllib.request.urlopen(request, timeout=240) as response:
-            if response.status not in (200, 201):
-                raise HTTPException(
-                    status_code=502,
-                    detail="Supabase gagal menyimpan file.",
-                )
-    except urllib.error.HTTPError as exc:
-        # Log respons Supabase untuk diagnosis. Secret key tidak dicatat.
-        error_body = exc.read().decode("utf-8", errors="replace")
-        print(
-            f"Supabase upload error: HTTP {exc.code}; "
-            f"response: {error_body[:1000]}",
-            flush=True,
+    async with httpx.AsyncClient(timeout=240.0) as client:
+        resp = await client.post(
+            storage_url,
+            content=content,
+            headers={
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "apikey": SUPABASE_KEY,
+                "Content-Type": content_type,
+                "x-upsert": "false",
+            }
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Supabase menolak unggahan (HTTP {exc.code}).",
-        ) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        print(
-            f"Supabase connection error: {type(exc).__name__}: {exc}",
-            flush=True,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Supabase tidak dapat dijangkau saat mengunggah file.",
-        ) from exc
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status_code=502, detail=f"Supabase menolak unggahan (HTTP {resp.status_code}).")
 
-    with get_db() as connection:
-        connection.execute(
-            """
-            INSERT INTO survey_media (
-                survey_id,
-                member_id,
-                object_path,
-                content_type,
-                original_filename,
-                file_size,
-                media_category
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                survey_id,
-                member_id,
-                object_path,
-                content_type,
-                os.path.basename(file.filename or "file"),
-                len(content),
-                media_category,
-            ),
-        )
+    conn.execute(
+        """
+        INSERT INTO survey_media (survey_id, member_id, object_path, content_type, original_filename, file_size, media_category)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (survey_id, member_id, object_path, content_type, os.path.basename(file.filename or "file"), len(content), media_category)
+    )
 
     return {
         "message": "File berhasil diunggah.",
@@ -1146,256 +889,100 @@ async def upload_survey_media(
 
 
 @app.get("/admin/surveys/{survey_id}/media")
-def list_survey_media(
-    survey_id: int,
-    _: bool = Depends(verify_api_key),
-):
-    with get_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT id, survey_id, member_id, object_path,
-                   content_type, original_filename, file_size, uploaded_at,
-                   media_category
-            FROM survey_media
-            WHERE survey_id = %s
-            ORDER BY id
-            """,
-            (survey_id,),
-        ).fetchall()
+def list_survey_media(survey_id: int, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    rows = conn.execute("SELECT id, survey_id, member_id, object_path, content_type, original_filename, file_size, uploaded_at, media_category FROM survey_media WHERE survey_id = %s ORDER BY id", (survey_id,)).fetchall()
     return [dict(row) for row in rows]
 
 
 # =========================================================
-# HAPUS SATU SURVEI BESERTA MEDIA TERKAIT
+# PENGHAPUSAN SURVEI
 # =========================================================
 
-def delete_survey_record(survey_id: int):
-    """Hapus media survei terpilih, lalu catatan surveinya."""
-    with get_db() as connection:
-        survey = connection.execute(
-            "SELECT id FROM surveys WHERE id = %s",
-            (survey_id,),
-        ).fetchone()
-        if survey is None:
-            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
-        media_rows = connection.execute(
-            "SELECT object_path FROM survey_media WHERE survey_id = %s",
-            (survey_id,),
-        ).fetchall()
-        verification_media_rows = connection.execute(
-            "SELECT object_path FROM verification_media WHERE survey_id = %s",
-            (survey_id,),
-        ).fetchall()
+def delete_survey_record(survey_id: int, conn):
+    survey = conn.execute("SELECT id FROM surveys WHERE id = %s", (survey_id,)).fetchone()
+    if survey is None:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+
+    media_rows = conn.execute("SELECT object_path FROM survey_media WHERE survey_id = %s", (survey_id,)).fetchall()
+    verification_media_rows = conn.execute("SELECT object_path FROM verification_media WHERE survey_id = %s", (survey_id,)).fetchall()
 
     object_paths = [row["object_path"] for row in media_rows + verification_media_rows]
 
-    if object_paths:
-        supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-        supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
-        if not supabase_url or not supabase_key:
-            raise HTTPException(
-                status_code=503,
-                detail="Konfigurasi Supabase belum lengkap. Survei tidak dihapus.",
-            )
-
-        storage_url = f"{supabase_url}/storage/v1/object/survey-media"
-        payload = json.dumps({"prefixes": object_paths}).encode("utf-8")
-        request = urllib.request.Request(
-            storage_url,
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {supabase_key}",
-                "apikey": supabase_key,
-                "Content-Type": "application/json",
-            },
-            method="DELETE",
-        )
+    if object_paths and SUPABASE_URL and SUPABASE_KEY:
+        storage_url = f"{SUPABASE_URL}/storage/v1/object/survey-media"
+        payload = json.dumps({"prefixes": object_paths})
         try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                if response.status not in (200, 204):
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Supabase tidak mengonfirmasi penghapusan media.",
-                    )
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            print(
-                f"Supabase delete error: HTTP {exc.code}; response: {error_body[:500]}",
-                flush=True,
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=f"Supabase gagal menghapus media (HTTP {exc.code}). Survei belum dihapus dari database.",
-            ) from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            print(f"Supabase delete connection error: {type(exc).__name__}", flush=True)
-            raise HTTPException(
-                status_code=502,
-                detail="Supabase tidak dapat dijangkau. Survei belum dihapus dari database.",
-            ) from exc
+            with httpx.Client(timeout=45.0) as client:
+                resp = client.request(
+                    "DELETE",
+                    storage_url,
+                    content=payload,
+                    headers={
+                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                        "apikey": SUPABASE_KEY,
+                        "Content-Type": "application/json",
+                    }
+                )
+                if resp.status_code not in (200, 204):
+                    raise HTTPException(status_code=502, detail="Supabase tidak mengonfirmasi penghapusan media.")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Gagal terhubung ke Supabase saat menghapus media.") from exc
 
-    with get_db() as connection:
-        connection.execute(
-            "DELETE FROM survey_media WHERE survey_id = %s",
-            (survey_id,),
-        )
-        connection.execute(
-            "DELETE FROM verification_media WHERE survey_id = %s",
-            (survey_id,),
-        )
-        result = connection.execute(
-            "DELETE FROM surveys WHERE id = %s",
-            (survey_id,),
-        )
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
+    conn.execute("DELETE FROM survey_media WHERE survey_id = %s", (survey_id,))
+    conn.execute("DELETE FROM verification_media WHERE survey_id = %s", (survey_id,))
+    result = conn.execute("DELETE FROM surveys WHERE id = %s", (survey_id,))
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Data survei tidak ditemukan.")
 
-    return {
-        "message": "Survei dan media terkait berhasil dihapus.",
-        "survey_id": survey_id,
-        "media_deleted": len(object_paths),
-    }
+    return {"message": "Survei dan media terkait berhasil dihapus.", "survey_id": survey_id, "media_deleted": len(object_paths)}
 
 
 @app.delete("/admin/surveys/{survey_id}")
-def delete_survey_api(
-    survey_id: int,
-    _: bool = Depends(verify_api_key),
-):
-    return delete_survey_record(survey_id)
-
-
+def delete_survey_api(survey_id: int, _: bool = Depends(verify_api_key), conn=Depends(get_db)):
+    return delete_survey_record(survey_id, conn)
 
 
 # =========================================================
-# DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
+# DASHBOARD WEB ADMIN LENGKAP
 # =========================================================
 
 admin_security = HTTPBasic()
 
 
-def verify_admin(
-    credentials: HTTPBasicCredentials = Depends(admin_security),
-):
+def verify_admin(credentials: HTTPBasicCredentials = Depends(admin_security)):
     admin_username = os.environ.get("ADMIN_USERNAME", "")
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
-
     if not admin_username or not admin_password:
-        raise HTTPException(
-            status_code=503,
-            detail="Login admin belum dikonfigurasi di server."
-        )
+        raise HTTPException(status_code=503, detail="Login admin belum dikonfigurasi di server.")
 
-    username_ok = secrets.compare_digest(
-        credentials.username.encode("utf-8"),
-        admin_username.encode("utf-8"),
-    )
-
-    password_ok = secrets.compare_digest(
-        credentials.password.encode("utf-8"),
-        admin_password.encode("utf-8"),
-    )
-
-    if not (username_ok and password_ok):
-        raise HTTPException(
-            status_code=401,
-            detail="Username atau kata sandi salah.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
+    if not (
+        secrets.compare_digest(credentials.username.encode("utf-8"), admin_username.encode("utf-8"))
+        and secrets.compare_digest(credentials.password.encode("utf-8"), admin_password.encode("utf-8"))
+    ):
+        raise HTTPException(status_code=401, detail="Username atau kata sandi salah.", headers={"WWW-Authenticate": "Basic"})
 
     return credentials.username
 
 
-def create_supabase_signed_url(object_path: str, expires_in: int = 3600) -> str | None:
-    """Buat URL sementara untuk menampilkan file dari bucket privat."""
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
-    if not supabase_url or not supabase_key:
-        print("Dashboard media: konfigurasi Supabase belum lengkap.", flush=True)
-        return None
-
-    sign_url = (
-        f"{supabase_url}/storage/v1/object/sign/survey-media/"
-        f"{quote(object_path, safe='/')}"
-    )
-    payload = json.dumps({"expiresIn": expires_in}).encode("utf-8")
-    request = urllib.request.Request(
-        sign_url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {supabase_key}",
-            "apikey": supabase_key,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        signed_path = result.get("signedURL") or result.get("signedUrl")
-        if not signed_path:
-            print("Dashboard media: respons URL bertanda tangan tidak berisi signedURL.", flush=True)
-            return None
-        if signed_path.startswith("http://") or signed_path.startswith("https://"):
-            return signed_path
-        if signed_path.startswith("/"):
-            # Supabase biasanya mengembalikan path /object/sign/...
-            if signed_path.startswith("/storage/v1/"):
-                return f"{supabase_url}{signed_path}"
-            return f"{supabase_url}/storage/v1{signed_path}"
-        return f"{supabase_url}/storage/v1/{signed_path.lstrip('/')}"
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
-        status = getattr(exc, "code", "connection")
-        print(f"Dashboard media: gagal membuat signed URL ({status}).", flush=True)
-        return None
-
-
 @app.post("/admin/surveys/{survey_id}/delete")
-def delete_survey_from_admin(
-    survey_id: int,
-    username: str = Depends(verify_admin),
-):
+def delete_survey_from_admin(survey_id: int, username: str = Depends(verify_admin), conn=Depends(get_db)):
     try:
-        delete_survey_record(survey_id)
+        delete_survey_record(survey_id, conn)
     except HTTPException as exc:
         message = escape(str(exc.detail))
         return HTMLResponse(
-            content=(
-                "<h2>Penghapusan gagal</h2>"
-                f"<p>{message}</p>"
-                '<p><a href="/admin">Kembali ke dashboard</a></p>'
-            ),
+            content=f"<h2>Penghapusan gagal</h2><p>{message}</p><p><a href='/admin'>Kembali ke dashboard</a></p>",
             status_code=exc.status_code,
         )
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_dashboard(
-    username: str = Depends(verify_admin),
-):
-    with get_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT *
-            FROM surveys
-            ORDER BY id DESC
-            """
-        ).fetchall()
-        media_rows = connection.execute(
-            """
-            SELECT id, survey_id, member_id, object_path, content_type,
-                   original_filename, file_size, uploaded_at, media_category
-            FROM survey_media
-            ORDER BY id DESC
-            """
-        ).fetchall()
-        verification_rows = connection.execute(
-            "SELECT * FROM survey_verifications ORDER BY id DESC"
-        ).fetchall()
-        verification_media_rows = connection.execute(
-            "SELECT * FROM verification_media ORDER BY id DESC"
-        ).fetchall()
+def admin_dashboard(username: str = Depends(verify_admin), conn=Depends(get_db)):
+    rows = conn.execute("SELECT * FROM surveys ORDER BY id DESC").fetchall()
+    media_rows = conn.execute("SELECT id, survey_id, member_id, object_path, content_type, original_filename, file_size, uploaded_at, media_category FROM survey_media ORDER BY id DESC").fetchall()
+    verification_rows = conn.execute("SELECT * FROM survey_verifications ORDER BY id DESC").fetchall()
+    verification_media_rows = conn.execute("SELECT * FROM verification_media ORDER BY id DESC").fetchall()
 
     verification_by_survey = {row["survey_id"]: row for row in verification_rows}
     verification_media_by_survey = {}
@@ -1444,13 +1031,10 @@ def admin_dashboard(
                         f'<small>{size_mb:.2f} MB</small></div>'
                     )
                 else:
-                    media_html.append(
-                        f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>'
-                    )
+                    media_html.append(f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a>')
             else:
-                media_html.append(
-                    f'<span>{filename} (tersimpan, pratinjau gagal dibuat)</span>'
-                )
+                media_html.append(f'<span>{filename} (tersimpan, pratinjau gagal)</span>')
+
         for media in verification_media_by_survey.get(survey_id, []):
             signed_url = create_supabase_signed_url(media["object_path"])
             filename = escape(str(media.get("original_filename") or "Foto verifikasi"))
@@ -1459,11 +1043,11 @@ def admin_dashboard(
                 media_html.append(
                     f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
                     f'<img class="media-thumb" src="{safe_url}" alt="{filename}"></a>'
-                    f'<div><strong>Foto Verifikasi DPS</strong><br>'
-                    f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a></div>'
+                    f'<div><strong>Foto Verifikasi DPS</strong><br><a href="{safe_url}" target="_blank" rel="noopener noreferrer">{filename}</a></div>'
                 )
             else:
-                media_html.append(f'<span>{filename} (pratinjau gagal dibuat)</span>')
+                media_html.append(f'<span>{filename} (pratinjau gagal)</span>')
+
         media_cell = "<br>".join(media_html) if media_html else '<span class="muted">Belum ada media</span>'
         verification_row = verification_by_survey.get(survey_id)
         needs_summary = "-"
@@ -1477,7 +1061,7 @@ def admin_dashboard(
             needs_summary = "\n".join(
                 f"- {item.get('item_name', 'Item')}: {item.get('quantity', 0)} {item.get('unit', 'unit')} x Rp {item.get('unit_price', 0):,.0f}"
                 for item in needs
-            ) or "Tidak ada item kebutuhan yang dicatat"
+            ) or "Tidak ada item kebutuhan"
 
         detail_text = "\n".join([
             f"Pemohon: {row.get('applicant_name') or '-'}",
@@ -1524,6 +1108,7 @@ def admin_dashboard(
             f"Alasan penolakan: {verification_row.get('rejection_reason') if verification_row else '-'}",
             f"GPS verifikasi: {str(verification_row.get('latitude')) + ', ' + str(verification_row.get('longitude')) if verification_row else '-'}",
         ])
+
         table_rows += f"""
         <tr>
             <td>{survey_id}</td>
@@ -1594,13 +1179,7 @@ def admin_dashboard(
     """
     return HTMLResponse(content=page)
 
-# =========================================================
-# MENJALANKAN SERVER SECARA LOKAL
-# =========================================================
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8000")),
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
