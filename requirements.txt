@@ -4,3 +4,4 @@ psycopg[binary]
 psycopg-pool
 httpx
 pydantic
+python-multipart
