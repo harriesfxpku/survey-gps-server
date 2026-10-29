@@ -49,8 +49,8 @@ api_key_header = APIKeyHeader(
 
 app = FastAPI(
     title="Survei GPS API",
-    description="Server pusat aplikasi Survei GPS",
-    version="3.2.2-multivillage-media-fix",
+    description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
+    version="3.2.1-multivillage-fix1",
 )
 
 app.add_middleware(
@@ -490,7 +490,8 @@ def officer_logout(authorization: str | None = Header(default=None)):
     return {"message": "Berhasil keluar."}
 
 
-@app.post("/admin/officers")
+@app.post("/admin/officers", include_in_schema=False)
+@app.post("/admin/akun-petugas", tags=["Pengelolaan Akun"], summary="Buat akun DPS atau DPSS")
 def create_officer(
     payload: OfficerCreate,
     _: bool = Depends(verify_api_key),
@@ -524,7 +525,8 @@ def create_officer(
     return {"message": "Akun petugas berhasil dibuat.", "member_id": member_id, "member_name": member_name, "role": role, "region": region, "active": True}
 
 
-@app.get("/admin/officers")
+@app.get("/admin/officers", include_in_schema=False)
+@app.get("/admin/akun-petugas", tags=["Pengelolaan Akun"], summary="Lihat daftar akun DPS dan DPSS")
 def list_officers(_: bool = Depends(verify_api_key)):
     with get_db() as connection:
         rows = connection.execute(
@@ -545,7 +547,8 @@ def _storage_slug(value: str) -> str:
     return slug[:100] or "survey-media"
 
 
-@app.get("/admin/villages")
+@app.get("/admin/villages", include_in_schema=False)
+@app.get("/admin/data-desa", tags=["Data Wilayah"], summary="Lihat daftar desa dan kecamatan")
 def list_villages(_: bool = Depends(verify_api_key)):
     with get_db() as connection:
         rows = connection.execute(
@@ -554,7 +557,8 @@ def list_villages(_: bool = Depends(verify_api_key)):
     return [dict(row) for row in rows]
 
 
-@app.post("/admin/villages")
+@app.post("/admin/villages", include_in_schema=False)
+@app.post("/admin/data-desa", tags=["Data Wilayah"], summary="Tambah data desa dan kecamatan")
 def create_village(payload: VillageCreate, _: bool = Depends(verify_api_key)):
     village_name = payload.village_name.strip()
     district = payload.district.strip()
@@ -580,7 +584,8 @@ class OfficerVillageAssignment(BaseModel):
     villages: list[str] = Field(min_length=1, max_length=20)
 
 
-@app.post("/admin/officers/{member_id}/villages")
+@app.post("/admin/officers/{member_id}/villages", include_in_schema=False)
+@app.post("/admin/akun-petugas/{member_id}/penugasan-desa", tags=["Pengelolaan Akun"], summary="Atur desa tugas akun petugas")
 def assign_officer_villages(
     member_id: str,
     payload: OfficerVillageAssignment,
@@ -606,7 +611,8 @@ def assign_officer_villages(
     return {"message": "Penugasan desa berhasil diperbarui.", "member_id": normalized_id, "villages": [v["village_name"] for v in villages]}
 
 
-@app.post("/admin/officers/{member_id}/deactivate")
+@app.post("/admin/officers/{member_id}/deactivate", include_in_schema=False)
+@app.post("/admin/akun-petugas/{member_id}/nonaktifkan", tags=["Pengelolaan Akun"], summary="Nonaktifkan akun petugas")
 def deactivate_officer(member_id: str, _: bool = Depends(verify_api_key)):
     with get_db() as connection:
         result = connection.execute(
