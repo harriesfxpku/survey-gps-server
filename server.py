@@ -24,7 +24,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from html import escape
-
+from fastapi.responses import FileResponse
+from pathlib import Path
 
 # =========================================================
 # KONFIGURASI
@@ -61,6 +62,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/logo.png")
+def get_logo():
+    logo_path = Path(__file__).parent / "logo.png"
+    if not logo_path.exists():
+        return {"error": "Logo tidak ditemukan"}
+    return FileResponse(logo_path, media_type="image/png")
 
 # =========================================================
 # KONEKSI DATABASE
