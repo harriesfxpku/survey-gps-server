@@ -318,7 +318,6 @@ def ensure_dps_survey_access(connection, identity, survey_id):
     # Penugasan desa eksplisit tetap didukung untuk menjaga kompatibilitas.
     row = connection.execute("""SELECT s.id
         FROM surveys s
-        LEFT JOIN villages v ON v.id = s.village_id
         JOIN officers o ON o.member_id = %s AND o.active = 1
         WHERE s.id = %s
           AND (
@@ -326,8 +325,17 @@ def ensure_dps_survey_access(connection, identity, survey_id):
                 SELECT 1 FROM officer_villages ov
                 WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
             )
-            OR lower(trim(coalesce(v.district, ''))) =
-               regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+            OR EXISTS (
+                SELECT 1 FROM villages v
+                WHERE v.active = 1
+                  AND lower(trim(coalesce(v.district, ''))) =
+                      regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+                  AND (
+                      v.id = s.village_id
+                      OR lower(trim(coalesce(v.village_name, ''))) =
+                         lower(trim(coalesce(s.village, '')))
+                  )
+            )
           )""", (identity["member_id"], survey_id)).fetchone()
     if row is None:
         raise HTTPException(status_code=403, detail="Survei ini berada di luar wilayah kecamatan akun DPS.")
@@ -1022,15 +1030,23 @@ def list_surveys_for_verification(
         # Penugasan desa manual yang sudah ada juga tetap dihormati.
         base_query = """SELECT DISTINCT s.*
             FROM surveys s
-            LEFT JOIN villages v ON v.id = s.village_id
             JOIN officers o ON o.member_id = %s AND o.active = 1
             WHERE (
                 EXISTS (
                     SELECT 1 FROM officer_villages ov
                     WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
                 )
-                OR lower(trim(coalesce(v.district, ''))) =
-                   regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+                OR EXISTS (
+                    SELECT 1 FROM villages v
+                    WHERE v.active = 1
+                      AND lower(trim(coalesce(v.district, ''))) =
+                          regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+                      AND (
+                          v.id = s.village_id
+                          OR lower(trim(coalesce(v.village_name, ''))) =
+                             lower(trim(coalesce(s.village, '')))
+                      )
+                )
             )"""
         if not include_completed:
             base_query += " AND COALESCE(s.verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')"
