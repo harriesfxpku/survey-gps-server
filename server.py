@@ -1960,22 +1960,71 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
         for v in ["Sudah diverifikasi", "Belum diverifikasi", "Perlu ditinjau", "Ditolak"]
     )
     export_qs = ("?" + qs) if qs else ""
-    page = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'>
-<meta name='viewport' content='width=device-width,initial-scale=1'><title>Dashboard Pimpinan | Survei GPS</title>
+        page = f"""<!doctype html><html lang='id'>
+<head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Dashboard Pimpinan | Ikatan Persaudaraan Triple 555</title>
 <style>
-*{{box-sizing:border-box}}body{{margin:0;background:#f4f5f7;color:#202532;font:14px/1.5 system-ui,Segoe UI,Arial,sans-serif}}.wrap{{max-width:1600px;margin:auto;padding:22px}}header{{background:#5b1018;color:white;padding:24px;border-radius:14px}}h1{{margin:0 0 5px}}.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}}.card,.panel{{background:white;border:1px solid #e1e4e8;border-radius:12px;padding:16px}}.card strong{{display:block;font-size:26px}}.filters{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;align-items:end}}label{{display:block;font-weight:650;margin-bottom:4px}}input,select,button,.btn{{width:100%;min-height:40px;padding:8px 10px;border:1px solid #cbd0d8;border-radius:8px;font:inherit}}button,.btn{{display:inline-block;background:#5b1018;color:white;text-align:center;text-decoration:none;cursor:pointer;font-weight:700}}.btn.secondary{{background:#e9edf2;color:#202532}}.actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}}.actions .btn{{width:auto}}.tablewrap{{overflow:auto;margin-top:15px}}table{{border-collapse:collapse;width:100%;min-width:1350px;background:white}}th,td{{padding:10px;border-bottom:1px solid #e3e6eb;text-align:left;vertical-align:top;max-width:300px;overflow-wrap:anywhere}}th{{background:#f0f2f5;position:sticky;top:0}}small{{color:#657083}}.note{{color:#657083;font-size:12px}}@media(max-width:800px){{.wrap{{padding:10px}}.cards{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:1fr 1fr}}}}
-</style></head><body><main class='wrap'><header><h1>Dashboard Pimpinan</h1><div>Rekap survei dan hasil verifikasi Survei GPS</div><div class='note' style='color:#f5dfe2'>Akses dilindungi login admin. Dashboard ini tidak menyediakan fungsi menghapus atau mengubah data.</div></header>
-<div class='cards'><div class='card'>Total data<strong>{total}</strong></div><div class='card'>Sudah diverifikasi<strong>{verified}</strong></div><div class='card'>Belum selesai<strong>{pending}</strong></div><div class='card'>Ditolak<strong>{rejected}</strong></div></div>
-<section class='panel'><form method='get' action='/pimpinan'><div class='filters'>
-<div><label>Tanggal survei mulai</label><input type='date' name='tanggal_mulai' value='{e(f['tanggal_mulai'])}'></div>
-<div><label>Tanggal survei sampai</label><input type='date' name='tanggal_selesai' value='{e(f['tanggal_selesai'])}'></div>
-<div><label>Desa / wilayah</label><input name='wilayah' value='{e(f['wilayah'])}' placeholder='Cari wilayah'></div>
-<div><label>Petugas (ID/nama)</label><input name='petugas' value='{e(f['petugas'])}' placeholder='Cari petugas'></div>
-<div><label>Status verifikasi</label><select name='status'><option value=''>Semua status</option>{options}</select></div></div>
-<div class='actions'><button type='submit' style='width:auto'>Terapkan Filter</button><a class='btn secondary' href='/pimpinan'>Reset</a><a class='btn' href='/pimpinan/export/excel{export_qs}'>Ekspor Excel (.xlsx)</a><a class='btn' target='_blank' href='/pimpinan/export/pdf{export_qs}'>Cetak / Simpan PDF</a></div>
-<p class='note'>Ekspor mengikuti filter yang sedang aktif. Untuk PDF, halaman laporan akan terbuka, lalu pilih Cetak / Simpan sebagai PDF.</p></form></section>
-<section class='panel'><b>{len(rows)} data ditampilkan</b><div class='tablewrap'><table><thead><tr><th>ID</th><th>Petugas</th><th>Wilayah</th><th>Pemohon</th><th>Usaha</th><th>Hasil verifikasi</th><th>Rincian verifikasi</th><th>GPS / waktu survei</th></tr></thead><tbody>{''.join(table_rows) if table_rows else '<tr><td colspan="8">Tidak ada data sesuai filter.</td></tr>'}</tbody></table></div></section>
-</main></body></html>"""
+:root{{--wine:#651b2b;--wine2:#43111d;--gold:#c8a34b;--gold-light:#f0d98c;--ink:#24212a;--muted:#77727b;--paper:#f7f5f2;--line:#e8e1dc;--green:#207653;--amber:#9b6813;--red:#a92f3e}}
+*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 Inter,Segoe UI,Arial,sans-serif}}
+a{{color:inherit}}.shell{{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}}
+.sidebar{{background:linear-gradient(180deg,var(--wine2),#32101a);color:#f8f0e7;padding:24px 16px;display:flex;flex-direction:column;gap:26px}}
+.brand-mini{{display:flex;align-items:center;gap:11px;padding:4px 7px 22px;border-bottom:1px solid #ffffff24}}
+.seal{{width:46px;height:46px;flex:0 0 46px;border:2px solid var(--gold);border-radius:50%;display:grid;place-items:center;color:var(--gold-light);font-weight:900;font-size:15px;letter-spacing:-1px;box-shadow:inset 0 0 0 3px #c8a34b25}}
+.brand-mini strong{{display:block;font-size:12px;line-height:1.35;letter-spacing:.7px;color:var(--gold-light)}}.brand-mini small{{color:#e8d9d5;font-size:10px}}
+.nav-label{{color:#c8a34b;font-size:10px;font-weight:800;letter-spacing:1.8px;padding:0 10px}}
+.nav a{{display:flex;align-items:center;gap:12px;text-decoration:none;padding:11px 12px;margin:4px 0;border-radius:9px;color:#eadfe0;font-weight:600}}
+.nav a.active,.nav a:hover{{background:#ffffff12;color:var(--gold-light);border-left:3px solid var(--gold)}}.side-note{{margin-top:auto;color:#c9b7b9;font-size:11px;padding:12px 9px;border-top:1px solid #ffffff24}}
+.main{{min-width:0}}.topbar{{background:#fff;border-bottom:1px solid var(--line);padding:13px clamp(16px,3vw,34px);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}}
+.crumb{{font-size:12px;color:var(--muted)}}.user-pill{{border:1px solid var(--line);background:#fffaf5;border-radius:99px;padding:8px 13px;font-weight:700;color:var(--wine)}}
+.content{{padding:clamp(16px,3vw,32px);max-width:1800px;margin:auto}}
+.hero{{position:relative;overflow:hidden;border-radius:17px;padding:clamp(22px,3vw,34px);color:#fff;background:radial-gradient(ellipse at 90% 0%,#8b3b42 0,transparent 42%),linear-gradient(120deg,var(--wine2),var(--wine));box-shadow:0 12px 30px #43111d18}}
+.hero:after{{content:'555';position:absolute;right:30px;top:-30px;font-size:clamp(100px,15vw,190px);font-weight:900;letter-spacing:-12px;color:#ffffff08;pointer-events:none}}
+.hero-brand{{display:flex;align-items:center;gap:16px;position:relative;z-index:1}}.hero .seal{{width:64px;height:64px;flex-basis:64px;font-size:19px;border-width:2px}}
+.eyebrow{{font-size:10px;text-transform:uppercase;letter-spacing:2.2px;color:var(--gold-light);font-weight:800;margin-bottom:4px}}
+.hero h1{{margin:0;color:var(--gold-light);font-size:clamp(19px,2.5vw,29px);line-height:1.25;letter-spacing:.6px}}.hero p{{margin:7px 0 0;color:#f2e5e5;font-size:13px}}.hero-foot{{position:relative;z-index:1;margin-top:20px;padding-top:13px;border-top:1px solid #ffffff25;color:#f1dfe0;font-size:12px}}
+.page-title{{display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap;margin:25px 0 15px}}.page-title h2{{font-size:22px;margin:0;color:var(--wine2)}}.page-title p{{margin:3px 0 0;color:var(--muted)}}
+.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:16px 0 22px}}.card{{background:#fff;border:1px solid var(--line);border-radius:13px;padding:17px;box-shadow:0 4px 12px #28101905;position:relative;overflow:hidden}}.card:before{{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--gold)}}.card-label{{font-size:12px;color:var(--muted);font-weight:700}}.card strong{{display:block;font-size:30px;line-height:1.25;margin-top:8px;color:var(--wine2)}}.card-icon{{float:right;color:var(--gold);font-size:20px}}
+.panel{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:clamp(15px,2vw,22px);margin:16px 0;box-shadow:0 5px 16px #28101905}}.panel-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:15px}}.panel h3{{margin:0;font-size:16px;color:var(--wine2)}}.panel-head small{{color:var(--muted)}}
+.filters{{display:grid;grid-template-columns:repeat(5,minmax(125px,1fr));gap:12px;align-items:end}}label{{display:block;font-size:12px;font-weight:750;color:#51434a;margin-bottom:6px}}input,select,button,.btn{{width:100%;min-height:42px;padding:9px 11px;border:1px solid #ddd2d0;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}}input:focus,select:focus{{outline:2px solid #c8a34b66;border-color:var(--gold)}}button,.btn{{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--wine);border-color:var(--wine);color:#fff;text-align:center;text-decoration:none;cursor:pointer;font-weight:750;transition:transform .15s,background .15s}}button:hover,.btn:hover{{background:var(--wine2);transform:translateY(-1px)}}.btn.gold{{background:var(--gold);border-color:var(--gold);color:#32101a}}.btn.light{{background:#fffaf1;border-color:#e6d5a9;color:var(--wine)}}.actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}}.actions .btn,.actions button{{width:auto;min-width:125px}}
+.tablewrap{{overflow:auto;border:1px solid var(--line);border-radius:9px}}table{{border-collapse:separate;border-spacing:0;width:100%;min-width:1350px;background:#fff}}th,td{{padding:12px;border-bottom:1px solid #eee8e4;text-align:left;vertical-align:top;max-width:300px;overflow-wrap:anywhere}}th{{background:#f6efe9;color:var(--wine2);font-size:11px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0}}tbody tr:hover{{background:#fffaf5}}tbody tr:last-child td{{border-bottom:0}}td{{font-size:12px}}td b{{color:#35252a}}small{{color:var(--muted)}}.status{{display:inline-block;padding:4px 8px;border-radius:99px;background:#f7edcf;color:#81580c;font-size:11px;font-weight:800}}.note{{color:var(--muted);font-size:11px;margin:12px 0 0}}.footer{{text-align:center;color:#8b7d7f;font-size:11px;padding:20px 10px}}
+@media(max-width:1100px){{.shell{{grid-template-columns:190px minmax(0,1fr)}}.filters{{grid-template-columns:repeat(3,minmax(0,1fr))}}.cards{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:700px){{.shell{{display:block}}.sidebar{{padding:12px;gap:12px}}.brand-mini{{padding:3px 5px 12px}}.nav{{display:flex;overflow:auto;gap:5px}}.nav-label,.side-note{{display:none}}.nav a{{white-space:nowrap;padding:9px 11px;margin:0}}.nav a.active{{border-left:0;border-bottom:2px solid var(--gold)}}.content{{padding:12px}}.hero{{padding:20px}}.hero .seal{{width:50px;height:50px;flex-basis:50px}}.hero-brand{{gap:11px}}.filters{{grid-template-columns:1fr 1fr}}.cards{{gap:9px}}.card{{padding:14px}}.card strong{{font-size:25px}}.topbar{{padding:11px 14px}}}}
+@media(max-width:390px){{.filters{{grid-template-columns:1fr}}.hero-brand{{align-items:flex-start}}.hero h1{{font-size:17px}}}}
+</style></head>
+<body><div class='shell'>
+<aside class='sidebar'>
+  <div class='brand-mini'><div class='seal'>555</div><div><strong>TRIPLE 555</strong><small>Sistem Informasi Organisasi</small></div></div>
+  <div class='nav-label'>MENU UTAMA</div>
+  <nav class='nav'><a class='active' href='#ringkasan'>▦ &nbsp; Dashboard</a><a href='#filter'>⌕ &nbsp; Filter Data</a><a href='#data'>▤ &nbsp; Data Survei</a><a href='#laporan'>⇩ &nbsp; Laporan</a></nav>
+  <div class='side-note'>Portal internal<br><span style='color:var(--gold-light)'>Ikatan Persaudaraan Triple 555</span></div>
+</aside>
+<div class='main'>
+  <div class='topbar'><div class='crumb'>Portal Organisasi &nbsp;›&nbsp; Dashboard Pimpinan</div><div class='user-pill'>● &nbsp; {e(username)} &nbsp; · &nbsp; Pimpinan/Admin</div></div>
+  <main class='content'>
+    <header class='hero'><div class='hero-brand'><div class='seal'>555</div><div><div class='eyebrow'>Portal resmi organisasi</div><h1>IKATAN PERSAUDARAAN TRIPLE 555</h1><p>Sistem Informasi Survei dan Verifikasi</p></div></div><div class='hero-foot'>Dashboard Pimpinan &nbsp;•&nbsp; Rekap data survei dan hasil verifikasi</div></header>
+    <section id='ringkasan'><div class='page-title'><div><h2>Ringkasan Data</h2><p>Pantau perkembangan survei dan verifikasi dalam satu tempat.</p></div></div>
+      <div class='cards'><div class='card'><span class='card-icon'>▤</span><div class='card-label'>TOTAL SURVEI</div><strong>{total:,}</strong></div><div class='card'><span class='card-icon'>✓</span><div class='card-label'>TERVERIFIKASI</div><strong>{verified:,}</strong></div><div class='card'><span class='card-icon'>◷</span><div class='card-label'>MENUNGGU</div><strong>{pending:,}</strong></div><div class='card'><span class='card-icon'>×</span><div class='card-label'>DITOLAK</div><strong>{rejected:,}</strong></div></div>
+    </section>
+    <section class='panel' id='filter'><div class='panel-head'><div><h3>Filter & Unduh Laporan</h3><small>Pilih kriteria untuk menyaring data yang ditampilkan.</small></div></div>
+      <form method='get' action='/pimpinan'><div class='filters'>
+      <div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{e(f['tanggal_mulai'])}'></div>
+      <div><label>TANGGAL AKHIR</label><input type='date' name='tanggal_selesai' value='{e(f['tanggal_selesai'])}'></div>
+      <div><label>DESA / WILAYAH</label><input name='wilayah' value='{e(f['wilayah'])}' placeholder='Cari wilayah'></div>
+      <div><label>PETUGAS (ID/NAMA)</label><input name='petugas' value='{e(f['petugas'])}' placeholder='Cari petugas'></div>
+      <div><label>STATUS VERIFIKASI</label><select name='status'><option value=''>Semua status</option>{options}</select></div></div>
+      <div class='actions'><button type='submit'>⌕ Terapkan Filter</button><a class='btn light' href='/pimpinan'>↺ Reset</a><a class='btn gold' id='laporan' href='/pimpinan/export/excel{export_qs}'>↓ Ekspor Excel</a><a class='btn' target='_blank' href='/pimpinan/export/pdf{export_qs}'>▣ Ekspor PDF</a></div>
+      <p class='note'>Ekspor mengikuti filter aktif. PDF dapat dicetak atau disimpan sebagai berkas PDF.</p></form>
+    </section>
+    <section class='panel' id='data'><div class='panel-head'><div><h3>Data Survei & Hasil Verifikasi</h3><small>Informasi survei, petugas, wilayah, dan catatan verifikasi.</small></div><span class='status'>{len(rows):,} DATA</span></div>
+      <div class='tablewrap'><table><thead><tr><th>ID</th><th>Petugas</th><th>Wilayah</th><th>Pemohon</th><th>Usaha</th><th>Hasil Verifikasi</th><th>Rincian Verifikasi</th><th>GPS / Waktu Survei</th></tr></thead><tbody>{''.join(table_rows) if table_rows else '<tr><td colspan="8" style="text-align:center;padding:28px">Tidak ada data yang sesuai dengan filter.</td></tr>'}</tbody></table></div>
+      <p class='note'>Data bersifat sensitif. Gunakan dan unduh laporan sesuai kewenangan organisasi.</p>
+    </section>
+    <footer class='footer'>© 2026 Ikatan Persaudaraan Triple 555 · Sistem Informasi Survei dan Verifikasi</footer>
+  </main>
+</div></div></body></html>"""
+
+
     return HTMLResponse(content=page)
 
 
