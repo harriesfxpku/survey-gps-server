@@ -2001,7 +2001,15 @@ a{{color:inherit}}.shell{{display:grid;grid-template-columns:230px minmax(0,1fr)
 </style></head>
 <body><div class='shell'>
 <aside class='sidebar'>
-  <div class='brand-mini'><div class='seal'>555</div><div><strong>TRIPLE 555</strong><small>Sistem Informasi Organisasi</small></div></div>
+  <div class='brand-mini'>
+  <img src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/logo.png'
+       alt='Logo Triple 555'
+       style='width:48px;height:48px;object-fit:contain;flex-shrink:0;'>
+  <div>
+    <strong>TRIPLE 555</strong>
+    <small>Sistem Informasi Organisasi</small>
+  </div>
+</div>
   <div class='nav-label'>MENU UTAMA</div>
   <nav class='nav'><a class='active' href='#ringkasan'>▦ &nbsp; Dashboard</a><a href='#filter'>⌕ &nbsp; Filter Data</a><a href='#data'>▤ &nbsp; Data Survei</a><a href='#laporan'>⇩ &nbsp; Laporan</a></nav>
   <div class='side-note'>Portal internal<br><span style='color:var(--gold-light)'>Ikatan Persaudaraan Triple 555</span></div>
