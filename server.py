@@ -530,8 +530,14 @@ def create_officer(
 def list_officers(_: bool = Depends(verify_api_key)):
     with get_db() as connection:
         rows = connection.execute(
-            """SELECT member_id, member_name, role, region, active, created_at, updated_at
-               FROM officers ORDER BY role, region, member_id"""
+            """SELECT o.member_id, o.member_name, o.role, o.region, o.active,
+                      o.created_at, o.updated_at,
+                      ARRAY(SELECT v.village_name
+                            FROM officer_villages ov
+                            JOIN villages v ON v.id = ov.village_id
+                            WHERE ov.officer_id = o.id
+                            ORDER BY v.village_name) AS villages
+               FROM officers o ORDER BY o.role, o.region, o.member_id"""
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -627,6 +633,29 @@ def deactivate_officer(member_id: str, _: bool = Depends(verify_api_key)):
             raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
         connection.execute("UPDATE members SET active = 0 WHERE member_id = %s", (member_id.strip().upper(),))
     return {"message": "Akun petugas dinonaktifkan.", "member_id": member_id.strip().upper()}
+
+
+@app.delete("/admin/akun-petugas/{member_id}", tags=["Pengelolaan Akun"], summary="Hapus akun petugas")
+def delete_officer(member_id: str, _: bool = Depends(verify_api_key)):
+    """Hapus akses akun petugas tanpa menghapus riwayat survei yang sudah dikirim."""
+    normalized_id = member_id.strip().upper()
+    with get_db() as connection:
+        officer = connection.execute(
+            "SELECT id FROM officers WHERE member_id = %s", (normalized_id,)
+        ).fetchone()
+        if officer is None:
+            raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+        connection.execute(
+            "DELETE FROM officer_sessions WHERE officer_id = %s", (officer["id"],)
+        )
+        connection.execute(
+            "DELETE FROM officers WHERE member_id = %s", (normalized_id,)
+        )
+        # Pertahankan baris anggota nonaktif untuk menjaga riwayat dan kompatibilitas data lama.
+        connection.execute(
+            "UPDATE members SET active = 0 WHERE member_id = %s", (normalized_id,)
+        )
+    return {"message": "Akun petugas berhasil dihapus. Riwayat survei tetap tersimpan.", "member_id": normalized_id}
 
 
 # =========================================================
@@ -1506,6 +1535,42 @@ def delete_survey_from_admin(
             status_code=exc.status_code,
         )
     return RedirectResponse(url="/admin", status_code=303)
+
+
+@app.get("/admin/kelola-akun", response_class=HTMLResponse)
+def account_management_dashboard():
+    return HTMLResponse(r"""<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kelola Akun | Survei GPS</title>
+<style>
+:root{--maroon:#5b1018;--gold:#d8b15a;--ink:#252525;--muted:#6b7280;--line:#e5e7eb;--paper:#fffaf3;--white:#fff;--red:#b42318;--green:#147d4b}
+*{box-sizing:border-box}body{margin:0;background:#f6f3ee;color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,Arial,sans-serif}.wrap{max-width:1120px;margin:auto;padding:24px 16px 48px}.top{background:var(--maroon);color:#fff;padding:22px;border-radius:16px;margin-bottom:18px}.top h1{margin:0 0 4px;font-size:25px}.top p{margin:0;color:#f4e8e8}.panel{background:var(--white);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}.panel h2{font-size:19px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.field{display:flex;flex-direction:column;gap:5px;min-width:0}.field.full{grid-column:1/-1}label{font-weight:650;font-size:13px}input,select{font:inherit;width:100%;min-height:44px;border:1px solid #cfd2d7;border-radius:9px;padding:9px 11px;background:#fff;color:var(--ink)}button{font:inherit;font-weight:700;border:0;border-radius:9px;min-height:44px;padding:10px 15px;cursor:pointer;background:var(--maroon);color:#fff}button.secondary{background:#ece7e2;color:#332b2b}button.danger{background:var(--red)}button:disabled{opacity:.55;cursor:wait}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}.hint{color:var(--muted);font-size:13px;margin:7px 0 0}.status{padding:11px 13px;border-radius:9px;margin:12px 0;display:none;white-space:pre-wrap}.status.show{display:block}.status.ok{background:#eaf7ef;color:#14532d}.status.err{background:#fff0ef;color:#8a1c13}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.toolbar .field{flex:1;min-width:190px}.tablewrap{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:690px}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:#626262;background:#fafafa}.pill{display:inline-block;padding:3px 8px;border-radius:20px;font-size:12px;font-weight:700;background:#e8f4ec;color:#17603b}.pill.off{background:#fce8e6;color:#9b1c14}.villages{display:flex;gap:8px;flex-wrap:wrap;margin-top:5px}.village{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:14px}.village input{width:17px;min-height:17px;margin:0}.smallbtn{min-height:34px;padding:6px 10px;font-size:13px}.keyrow{display:flex;gap:9px;align-items:end;flex-wrap:wrap}.keyrow .field{flex:1;min-width:220px}.subtle{font-size:13px;color:var(--muted)}@media(max-width:640px){.grid{grid-template-columns:1fr}.field.full{grid-column:auto}.wrap{padding:12px}.panel{padding:14px}.top{padding:18px}.top h1{font-size:22px}}
+</style></head><body><main class="wrap">
+<header class="top"><h1>Kelola Akun Petugas</h1><p>Survei GPS · DPS (Kecamatan) dan DPSS (Desa/Kelurahan)</p></header>
+<section class="panel"><h2>1. Sambungkan ke server</h2><div class="keyrow"><div class="field"><label for="apiKey">Kunci akses admin (API Token)</label><input id="apiKey" type="password" autocomplete="off" placeholder="Masukkan kunci akses server"></div><button id="connectBtn">Hubungkan & Muat Data</button></div><p class="hint">Kunci hanya dipakai di halaman ini dan tidak disimpan otomatis.</p><div id="status" class="status" role="status" aria-live="polite"></div></section>
+<section class="panel"><h2>2. Buat akun petugas</h2><form id="createForm"><div class="grid">
+<div class="field"><label for="newId">ID Petugas</label><input id="newId" required minlength="2" maxlength="50" placeholder="Contoh: DPSS003" autocomplete="off"></div>
+<div class="field"><label for="newName">Nama Petugas</label><input id="newName" required minlength="2" maxlength="100" placeholder="Nama lengkap"></div>
+<div class="field"><label for="newRole">Peran</label><select id="newRole"><option value="DPSS">DPSS · Desa/Kelurahan</option><option value="DPS">DPS · Kecamatan</option></select></div>
+<div class="field"><label for="newRegion">Wilayah</label><input id="newRegion" required maxlength="150" placeholder="Nama desa atau kecamatan"></div>
+<div class="field full"><label for="newPassword">Kata sandi awal (minimal 10 karakter)</label><input id="newPassword" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="Buat kata sandi untuk petugas"></div>
+</div><div class="actions"><button type="submit">Buat Akun</button></div></form></section>
+<section class="panel"><h2>3. Atur desa tugas</h2><div class="grid"><div class="field"><label for="assignAccount">Pilih akun petugas</label><select id="assignAccount"><option value="">Hubungkan server dulu</option></select></div><div class="field"><label>Pilih desa tugas</label><div id="villageChoices" class="villages"><span class="subtle">Daftar desa akan tampil setelah data dimuat.</span></div></div></div><div class="actions"><button id="assignBtn" type="button">Simpan Penugasan Desa</button></div><p class="hint">Centang satu atau beberapa desa. Menyimpan akan mengganti daftar penugasan akun tersebut.</p></section>
+<section class="panel"><div class="toolbar"><div><h2 style="margin-bottom:3px">4. Daftar akun</h2><div class="subtle">Akun yang dihapus tidak akan menghapus riwayat survei yang sudah dikirim.</div></div><div class="field"><label for="filter">Cari akun</label><input id="filter" placeholder="Cari ID, nama, peran, atau wilayah"></div><button id="refreshBtn" class="secondary" type="button">Muat Ulang</button></div><div class="tablewrap" style="margin-top:14px"><table><thead><tr><th>ID / Nama</th><th>Peran</th><th>Wilayah</th><th>Desa tugas</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="accountsBody"><tr><td colspan="6">Hubungkan server untuk memuat akun.</td></tr></tbody></table></div></section>
+</main><script>
+(function(){const $=id=>document.getElementById(id);let accounts=[],villages=[];
+function key(){return $('apiKey').value.trim()}function status(msg,ok=false){const e=$('status');e.textContent=msg;e.className='status show '+(ok?'ok':'err')}
+async function api(path,options={}){if(!key())throw Error('Masukkan kunci akses admin terlebih dahulu.');const headers=Object.assign({'X-API-Key':key()},options.headers||{});if(options.body)headers['Content-Type']='application/json';let response;try{response=await fetch(path,Object.assign({},options,{headers}));}catch(e){throw Error('Tidak dapat terhubung ke server. Periksa koneksi internet.')}let data={};try{data=await response.json()}catch(e){}if(!response.ok)throw Error(data.detail||data.message||('Permintaan gagal ('+response.status+').'));return data}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function load(){try{const [a,v]=await Promise.all([api('/admin/akun-petugas'),api('/admin/data-desa')]);accounts=Array.isArray(a)?a:[];villages=Array.isArray(v)?v:[];renderAccounts();renderAssign();status('Terhubung. '+accounts.length+' akun dan '+villages.length+' data desa dimuat.',true)}catch(e){status(e.message)}}
+function renderAccounts(){const q=$('filter').value.trim().toLowerCase();const rows=accounts.filter(a=>[a.member_id,a.member_name,a.role,a.region,...(a.villages||[])].join(' ').toLowerCase().includes(q));$('accountsBody').innerHTML=rows.length?rows.map(a=>`<tr><td><strong>${esc(a.member_id)}</strong><br>${esc(a.member_name)}</td><td>${esc(a.role)}</td><td>${esc(a.region)}</td><td>${(a.villages||[]).length?(a.villages||[]).map(esc).join(', '):'<span class="subtle">Belum ditetapkan</span>'}</td><td><span class="pill ${Number(a.active)===1?'':'off'}">${Number(a.active)===1?'Aktif':'Nonaktif'}</span></td><td><button class="danger smallbtn" type="button" data-delete="${esc(a.member_id)}">Hapus Akun</button></td></tr>`).join(''):'<tr><td colspan="6">Tidak ada akun yang cocok.</td></tr>';}
+function renderAssign(){const active=accounts.filter(a=>Number(a.active)===1);$('assignAccount').innerHTML='<option value="">Pilih akun DPSS</option>'+active.map(a=>`<option value="${esc(a.member_id)}">${esc(a.member_id)} · ${esc(a.member_name)} (${esc(a.role)})</option>`).join('');$('villageChoices').innerHTML=villages.filter(v=>Number(v.active)===1).map(v=>`<label class="village"><input type="checkbox" value="${esc(v.village_name)}"> <span>${esc(v.village_name)} <span class="subtle">· ${esc(v.district||'')}</span></span></label>`).join('')||'<span class="subtle">Belum ada data desa aktif.</span>';}
+$('connectBtn').addEventListener('click',load);$('refreshBtn').addEventListener('click',load);$('filter').addEventListener('input',renderAccounts);
+$('createForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;try{const payload={member_id:$('newId').value.trim().toUpperCase(),member_name:$('newName').value.trim(),role:$('newRole').value,region:$('newRegion').value.trim(),password:$('newPassword').value};const r=await api('/admin/akun-petugas',{method:'POST',body:JSON.stringify(payload)});$('createForm').reset();status((r.message||'Akun berhasil dibuat.')+' ID: '+payload.member_id,true);await load()}catch(err){status(err.message)}finally{btn.disabled=false}});
+$('assignBtn').addEventListener('click',async()=>{const id=$('assignAccount').value;const selected=[...$('villageChoices').querySelectorAll('input:checked')].map(x=>x.value);if(!id){status('Pilih akun petugas terlebih dahulu.');return}if(!selected.length){status('Pilih minimal satu desa tugas.');return}const btn=$('assignBtn');btn.disabled=true;try{const r=await api('/admin/akun-petugas/'+encodeURIComponent(id)+'/penugasan-desa',{method:'POST',body:JSON.stringify({villages:selected})});status((r.message||'Penugasan berhasil disimpan.')+' '+id+': '+selected.join(', '),true);await load();$('assignAccount').value=id;[...$('villageChoices').querySelectorAll('input')].forEach(x=>x.checked=selected.includes(x.value))}catch(e){status(e.message)}finally{btn.disabled=false}});
+$('accountsBody').addEventListener('click',async e=>{const btn=e.target.closest('[data-delete]');if(!btn)return;const id=btn.getAttribute('data-delete');if(!confirm('Hapus akun '+id+'? Akun tidak bisa login lagi. Riwayat survei yang sudah dikirim tetap disimpan.'))return;btn.disabled=true;try{const r=await api('/admin/akun-petugas/'+encodeURIComponent(id),{method:'DELETE'});status(r.message||('Akun '+id+' berhasil dihapus.'),true);await load()}catch(err){status(err.message);btn.disabled=false}});
+$('assignAccount').addEventListener('change',()=>{const id=$('assignAccount').value;const a=accounts.find(x=>x.member_id===id);const selected=(a&&a.villages)||[];[...$('villageChoices').querySelectorAll('input')].forEach(x=>x.checked=selected.includes(x.value))});
+})();</script></body></html>""")
 
 
 @app.get("/admin", response_class=HTMLResponse)
