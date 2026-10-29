@@ -1838,18 +1838,16 @@ def admin_dashboard(
     return HTMLResponse(content=page)
 
 # =========================================================
-# DASHBOARD PIMPINAN + EKSPOR EXCEL/PDF
+# DASHBOARD KHUSUS PIMPINAN: REKAP TERPISAH SURVEI DPSS DAN VERIFIKASI DPS
 # =========================================================
-
 from io import BytesIO
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasicCredentials
+from urllib.parse import urlencode
 
 
-def verify_pimpinan_or_admin(
-    credentials: HTTPBasicCredentials = Depends(admin_security),
-):
-    """Izinkan login admin lama atau akun pimpinan khusus dari environment."""
+def verify_pimpinan_or_admin(credentials: HTTPBasicCredentials = Depends(admin_security)):
+    """Akses dashboard untuk admin lama atau akun pimpinan dari environment."""
     allowed_pairs = [
         (os.environ.get("ADMIN_USERNAME", ""), os.environ.get("ADMIN_PASSWORD", "")),
         (os.environ.get("PIMPINAN_USERNAME", ""), os.environ.get("PIMPINAN_PASSWORD", "")),
@@ -1857,341 +1855,252 @@ def verify_pimpinan_or_admin(
     supplied_user = credentials.username.encode("utf-8")
     supplied_password = credentials.password.encode("utf-8")
     for expected_user, expected_password in allowed_pairs:
-        if not expected_user or not expected_password:
-            continue
-        user_ok = secrets.compare_digest(supplied_user, expected_user.encode("utf-8"))
-        password_ok = secrets.compare_digest(supplied_password, expected_password.encode("utf-8"))
-        if user_ok and password_ok:
+        if expected_user and expected_password and secrets.compare_digest(supplied_user, expected_user.encode("utf-8")) and secrets.compare_digest(supplied_password, expected_password.encode("utf-8")):
             return credentials.username
-    raise HTTPException(
-        status_code=401,
-        detail="Username atau kata sandi admin/pimpinan salah atau belum dikonfigurasi.",
-        headers={"WWW-Authenticate": "Basic"},
-    )
+    raise HTTPException(status_code=401, detail="Username atau kata sandi admin/pimpinan salah atau belum dikonfigurasi.", headers={"WWW-Authenticate": "Basic"})
 
 
-def _pimpinan_filtered_rows(tanggal_mulai="", tanggal_selesai="", wilayah="", petugas="", status=""):
-    clauses = []
-    params = []
+def _lead_filters(request):
+    return {k: request.query_params.get(k, "").strip() for k in ("tanggal_mulai", "tanggal_selesai", "wilayah", "petugas")}
 
-    if tanggal_mulai.strip():
-        clauses.append("NULLIF(s.surveyed_at, '')::timestamptz::date >= %s::date")
-        params.append(tanggal_mulai.strip())
-    if tanggal_selesai.strip():
-        clauses.append("NULLIF(s.surveyed_at, '')::timestamptz::date <= %s::date")
-        params.append(tanggal_selesai.strip())
-    if wilayah.strip():
-        clauses.append("COALESCE(s.village, '') ILIKE %s")
-        params.append("%" + wilayah.strip() + "%")
-    if petugas.strip():
-        clauses.append("(COALESCE(s.member_id, '') ILIKE %s OR COALESCE(o.member_name, '') ILIKE %s)")
-        params.extend(["%" + petugas.strip() + "%", "%" + petugas.strip() + "%"])
-    if status.strip():
-        clauses.append("COALESCE(v.decision, s.verification_status, 'Belum diverifikasi') = %s")
-        params.append(status.strip())
 
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    sql = """
-        SELECT
-            s.id AS survey_id, s.member_id, COALESCE(o.member_name, s.member_id) AS officer_name,
-            s.surveyed_at, s.received_at, s.village, s.applicant_name, s.applicant_nik,
-            s.applicant_phone, s.applicant_address, s.business_name, s.business_type,
-            s.business_location, s.capital_amount, s.turnover_amount, s.net_profit_amount,
-            s.worker_count, s.assistance_types, s.assistance_amount,
-            COALESCE(v.decision, s.verification_status, 'Belum diverifikasi') AS final_status,
-            v.verifier_id, v.verifier_name, v.verifier_region, v.verified_at,
-            v.business_condition, v.actual_business_activity, v.existing_assets,
-            v.data_match, v.discrepancy_notes, v.verification_notes, v.rejection_reason,
-            v.total_needs_amount, v.verified_turnover, v.verified_profit, v.verified_worker_count,
-            s.latitude, s.longitude
-        FROM surveys s
-        LEFT JOIN survey_verifications v ON v.survey_id = s.id
-        LEFT JOIN officers o ON o.member_id = s.member_id
-    """ + where_sql + " ORDER BY s.id DESC"
+def _lead_where(filters, alias="s"):
+    clauses, params = [], []
+    if filters.get("tanggal_mulai"):
+        clauses.append(f"NULLIF({alias}.surveyed_at, '')::timestamptz::date >= %s::date")
+        params.append(filters["tanggal_mulai"])
+    if filters.get("tanggal_selesai"):
+        clauses.append(f"NULLIF({alias}.surveyed_at, '')::timestamptz::date <= %s::date")
+        params.append(filters["tanggal_selesai"])
+    if filters.get("wilayah"):
+        clauses.append(f"COALESCE({alias}.village, '') ILIKE %s")
+        params.append("%" + filters["wilayah"] + "%")
+    if filters.get("petugas"):
+        clauses.append(f"(COALESCE({alias}.member_id, '') ILIKE %s OR COALESCE(o.member_name, '') ILIKE %s)")
+        params.extend(["%" + filters["petugas"] + "%", "%" + filters["petugas"] + "%"])
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), tuple(params)
 
+
+def _lead_survey_rows(filters):
+    where_sql, params = _lead_where(filters, "s")
+    sql = """SELECT s.id AS survey_id, s.member_id, COALESCE(o.member_name,s.member_id) AS officer_name,
+        s.surveyed_at, s.received_at, s.village, s.applicant_name, s.applicant_phone, s.applicant_address,
+        s.business_name, s.business_type, s.business_location, s.capital_amount, s.turnover_amount,
+        s.net_profit_amount, s.worker_count, s.assistance_types, s.assistance_amount, s.notes,
+        s.latitude, s.longitude
+        FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id""" + where_sql + " ORDER BY s.id DESC"
     with get_db() as connection:
-        return [dict(row) for row in connection.execute(sql, tuple(params)).fetchall()]
+        return [dict(r) for r in connection.execute(sql, params).fetchall()]
 
 
-def _pimpinan_filters(request):
-    return {
-        "tanggal_mulai": request.query_params.get("tanggal_mulai", "").strip(),
-        "tanggal_selesai": request.query_params.get("tanggal_selesai", "").strip(),
-        "wilayah": request.query_params.get("wilayah", "").strip(),
-        "petugas": request.query_params.get("petugas", "").strip(),
-        "status": request.query_params.get("status", "").strip(),
-    }
+def _lead_verification_rows(filters):
+    where_sql, params = _lead_where(filters, "s")
+    sql = """SELECT s.id AS survey_id, s.member_id, COALESCE(o.member_name,s.member_id) AS officer_name,
+        s.surveyed_at, s.village, s.applicant_name, s.business_name, s.business_type,
+        v.decision, v.verifier_id, v.verifier_name, v.verifier_region, v.verified_at,
+        v.business_condition, v.actual_business_activity, v.existing_assets, v.needs,
+        v.working_capital_details, v.verified_turnover, v.verified_profit, v.verified_worker_count,
+        v.data_match, v.discrepancy_notes, v.verification_notes, v.rejection_reason,
+        v.latitude AS verification_latitude, v.longitude AS verification_longitude,
+        v.total_needs_amount
+        FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id
+        JOIN survey_verifications v ON v.survey_id=s.id""" + where_sql + " ORDER BY v.verified_at DESC NULLS LAST, s.id DESC"
+    with get_db() as connection:
+        return [dict(r) for r in connection.execute(sql, params).fetchall()]
 
 
-def _pimpinan_qs(filters):
-    from urllib.parse import urlencode
+def _lead_media(survey_ids, verification=False):
+    if not survey_ids:
+        return {}
+    table = "verification_media" if verification else "survey_media"
+    with get_db() as connection:
+        rows = connection.execute(
+            f"SELECT survey_id, object_path, content_type, original_filename, file_size, storage_bucket" +
+            (", NULL AS media_category" if verification else ", COALESCE(media_category, 'business_photo') AS media_category") +
+            f" FROM {table} WHERE survey_id = ANY(%s) ORDER BY id", (survey_ids,)
+        ).fetchall()
+    grouped = {}
+    for item in rows:
+        item = dict(item)
+        category = str(item.get("media_category") or "business_photo").lower()
+        # Dokumen identitas pribadi tidak ditampilkan di laporan pimpinan.
+        if any(word in category for word in ("ktp", "kk", "identity", "face", "selfie", "document", "dokumen")):
+            continue
+        url = create_supabase_signed_url(item["object_path"], bucket=item.get("storage_bucket") or "survey-media")
+        item["signed_url"] = url
+        grouped.setdefault(item["survey_id"], []).append(item)
+    return grouped
+
+
+def _lead_e(value):
+    return escape("" if value is None else str(value), quote=True)
+
+
+def _lead_qs(filters):
     return urlencode({k: v for k, v in filters.items() if v})
 
 
-def _pimpinan_summary(rows):
-    total = len(rows)
-    verified = sum(1 for r in rows if r.get("final_status") == "Sudah diverifikasi")
-    rejected = sum(1 for r in rows if r.get("final_status") == "Ditolak")
-    pending = total - verified - rejected
-    return total, verified, pending, rejected
+def _lead_page(title, username, content):
+    return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>{_lead_e(title)} | Ikatan Persaudaraan Triple 555</title><style>
+:root{{--maroon:#5b1018;--deep:#31090e;--gold:#d8b15a;--paper:#f6f3ee;--ink:#262626;--line:#e5e0d8;--muted:#6b7280}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,var(--deep),var(--maroon));color:white;padding:24px max(16px,calc((100vw - 1400px)/2));border-bottom:4px solid var(--gold)}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:64px;height:64px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0;font-size:clamp(22px,3vw,32px)}}header p{{margin:4px 0 0;color:#f3e5d0}}.user{{margin-top:10px;color:#f3e5d0;font-size:13px}}main{{max-width:1400px;margin:auto;padding:20px 16px 40px}}.nav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}}a.btn,button{{display:inline-block;border:0;border-radius:9px;background:var(--maroon);color:white;padding:10px 14px;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}}a.gold{{background:var(--gold);color:#2b1b08}}a.light{{background:#fff;color:var(--maroon);border:1px solid var(--line)}}.panel,.metric{{background:white;border:1px solid var(--line);border-radius:13px;padding:16px;margin:12px 0;box-shadow:0 3px 12px #2b1b0808}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.metric strong{{display:block;font-size:26px;color:var(--maroon)}}.metric span{{color:var(--muted)}}.filters{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}label{{display:block;font-size:12px;font-weight:700;margin-bottom:5px}}input{{width:100%;min-height:40px;padding:8px;border:1px solid #d7d2ca;border-radius:8px;font:inherit}}.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}.tablewrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:850px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#f8f4ec;color:#5b1018;font-size:12px;white-space:nowrap}}td small{{color:var(--muted)}}.media{{display:flex;gap:8px;flex-wrap:wrap;max-width:300px}}.media img{{width:100px;height:78px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}}.media video{{width:180px;max-width:100%;border-radius:7px}}.muted{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:white;border:1px solid var(--line);border-top:4px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:var(--maroon)}}footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 @app.get("/pimpinan", response_class=HTMLResponse)
 def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
-    f = _pimpinan_filters(request)
-    rows = _pimpinan_filtered_rows(**f)
-    total, verified, pending, rejected = _pimpinan_summary(rows)
-    qs = _pimpinan_qs(f)
+    filters = _lead_filters(request)
+    surveys = _lead_survey_rows(filters)
+    verifications = _lead_verification_rows(filters)
+    pending = max(0, len(surveys) - len(verifications))
+    content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
+<section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
+<section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
+    return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
 
-    def e(value):
-        return escape("" if value is None else str(value), quote=True)
 
-    table_rows = []
+def _lead_filters_form(filters, base, export_prefix):
+    qs = _lead_qs(filters)
+    exp = "?" + qs if qs else ""
+    return f"""<section class='panel'><form method='get' action='{base}'><div class='filters'>
+    <div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{_lead_e(filters.get('tanggal_mulai'))}'></div>
+    <div><label>TANGGAL SELESAI</label><input type='date' name='tanggal_selesai' value='{_lead_e(filters.get('tanggal_selesai'))}'></div>
+    <div><label>WILAYAH / DESA</label><input name='wilayah' value='{_lead_e(filters.get('wilayah'))}' placeholder='Cari wilayah'></div>
+    <div><label>PETUGAS DPSS (ID/NAMA)</label><input name='petugas' value='{_lead_e(filters.get('petugas'))}' placeholder='Cari petugas'></div></div>
+    <div class='actions'><button type='submit'>Terapkan Filter</button><a class='btn light' href='{base}'>Reset</a><a class='btn gold' href='{export_prefix}/excel{exp}'>Ekspor Excel</a><a class='btn' target='_blank' href='{export_prefix}/pdf{exp}'>Ekspor PDF</a></div></form></section>"""
+
+
+def _lead_media_html(media_rows):
+    bits = []
+    for media in media_rows:
+        url = media.get("signed_url")
+        name = _lead_e(media.get("original_filename") or "Media")
+        if not url:
+            bits.append(f"<small>{name} · pratinjau tidak tersedia</small>")
+            continue
+        safe_url = _lead_e(url)
+        ctype = str(media.get("content_type") or "").lower()
+        if ctype.startswith("image/"):
+            bits.append(f"<a href='{safe_url}' target='_blank' rel='noopener'><img src='{safe_url}' alt='{name}' loading='lazy'></a>")
+        elif ctype.startswith("video/"):
+            bits.append(f"<video controls preload='metadata' src='{safe_url}'></video>")
+    return "<div class='media'>" + "".join(bits) + "</div>" if bits else "<span class='muted'>Belum ada foto/video usaha</span>"
+
+
+def _lead_report_html(rows, media_map, verification=False):
+    body = []
     for r in rows:
-        gps = f"{r.get('latitude') or ''}, {r.get('longitude') or ''}"
-        table_rows.append(
-            "<tr>"
-            f"<td>{e(r.get('survey_id'))}</td>"
-            f"<td>{e(r.get('officer_name'))}<br><small>{e(r.get('member_id'))}</small></td>"
-            f"<td>{e(r.get('village'))}</td>"
-            f"<td><b>{e(r.get('applicant_name'))}</b><br>NIK: {e(r.get('applicant_nik'))}<br>HP: {e(r.get('applicant_phone'))}<br>{e(r.get('applicant_address'))}</td>"
-            f"<td><b>{e(r.get('business_name'))}</b><br>{e(r.get('business_type'))}<br>Modal: {e(r.get('capital_amount'))}<br>Omzet awal: {e(r.get('turnover_amount'))}</td>"
-            f"<td><b>{e(r.get('final_status'))}</b><br>Verifikator: {e(r.get('verifier_name'))} ({e(r.get('verifier_id'))})<br>Wilayah verifikasi: {e(r.get('verifier_region'))}<br>Waktu: {e(r.get('verified_at'))}</td>"
-            f"<td>{e(r.get('business_condition'))}<br>Aktivitas: {e(r.get('actual_business_activity'))}<br>Kesesuaian: {e(r.get('data_match'))}<br>Catatan: {e(r.get('verification_notes'))}<br>Alasan penolakan: {e(r.get('rejection_reason'))}<br>Total kebutuhan: {e(r.get('total_needs_amount'))}</td>"
-            f"<td><a target='_blank' rel='noopener' href='https://www.google.com/maps?q={e(gps)}'>Buka peta</a><br>{e(r.get('surveyed_at'))}</td>"
-            "</tr>"
-        )
-
-    options = "".join(
-        f"<option value='{e(v)}' {'selected' if f['status'] == v else ''}>{e(v)}</option>"
-        for v in ["Sudah diverifikasi", "Belum diverifikasi", "Perlu ditinjau", "Ditolak"]
-    )
-    export_qs = ("?" + qs) if qs else ""
-    page = f"""<!doctype html><html lang='id'>
-<head>
-<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Dashboard Pimpinan | Ikatan Persaudaraan Triple 555</title>
-<style>
-:root{{--wine:#651b2b;--wine2:#43111d;--gold:#c8a34b;--gold-light:#f0d98c;--ink:#24212a;--muted:#77727b;--paper:#f7f5f2;--line:#e8e1dc;--green:#207653;--amber:#9b6813;--red:#a92f3e}}
-*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 Inter,Segoe UI,Arial,sans-serif}}
-a{{color:inherit}}.shell{{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:100vh}}
-.sidebar{{background:linear-gradient(180deg,var(--wine2),#32101a);color:#f8f0e7;padding:24px 16px;display:flex;flex-direction:column;gap:26px}}
-.brand-mini{{display:flex;align-items:center;gap:11px;padding:4px 7px 22px;border-bottom:1px solid #ffffff24}}
-.seal{{width:46px;height:46px;flex:0 0 46px;border:2px solid var(--gold);border-radius:50%;display:grid;place-items:center;color:var(--gold-light);font-weight:900;font-size:15px;letter-spacing:-1px;box-shadow:inset 0 0 0 3px #c8a34b25}}
-.brand-mini strong{{display:block;font-size:12px;line-height:1.35;letter-spacing:.7px;color:var(--gold-light)}}.brand-mini small{{color:#e8d9d5;font-size:10px}}
-.nav-label{{color:#c8a34b;font-size:10px;font-weight:800;letter-spacing:1.8px;padding:0 10px}}
-.nav a{{display:flex;align-items:center;gap:12px;text-decoration:none;padding:11px 12px;margin:4px 0;border-radius:9px;color:#eadfe0;font-weight:600}}
-.nav a.active,.nav a:hover{{background:#ffffff12;color:var(--gold-light);border-left:3px solid var(--gold)}}.side-note{{margin-top:auto;color:#c9b7b9;font-size:11px;padding:12px 9px;border-top:1px solid #ffffff24}}
-.main{{min-width:0}}.topbar{{background:#fff;border-bottom:1px solid var(--line);padding:13px clamp(16px,3vw,34px);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}}
-.crumb{{font-size:12px;color:var(--muted)}}.user-pill{{border:1px solid var(--line);background:#fffaf5;border-radius:99px;padding:8px 13px;font-weight:700;color:var(--wine)}}
-.content{{padding:clamp(16px,3vw,32px);max-width:1800px;margin:auto}}
-.hero{{position:relative;overflow:hidden;border-radius:17px;padding:clamp(22px,3vw,34px);color:#fff;background:radial-gradient(ellipse at 90% 0%,#8b3b42 0,transparent 42%),linear-gradient(120deg,var(--wine2),var(--wine));box-shadow:0 12px 30px #43111d18}}
-.hero:after{{content:'555';position:absolute;right:30px;top:-30px;font-size:clamp(100px,15vw,190px);font-weight:900;letter-spacing:-12px;color:#ffffff08;pointer-events:none}}
-.hero-brand{{display:flex;align-items:center;gap:16px;position:relative;z-index:1}}.hero .seal{{width:64px;height:64px;flex-basis:64px;font-size:19px;border-width:2px}}
-.eyebrow{{font-size:10px;text-transform:uppercase;letter-spacing:2.2px;color:var(--gold-light);font-weight:800;margin-bottom:4px}}
-.hero h1{{margin:0;color:var(--gold-light);font-size:clamp(19px,2.5vw,29px);line-height:1.25;letter-spacing:.6px}}.hero p{{margin:7px 0 0;color:#f2e5e5;font-size:13px}}.hero-foot{{position:relative;z-index:1;margin-top:20px;padding-top:13px;border-top:1px solid #ffffff25;color:#f1dfe0;font-size:12px}}
-.page-title{{display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap;margin:25px 0 15px}}.page-title h2{{font-size:22px;margin:0;color:var(--wine2)}}.page-title p{{margin:3px 0 0;color:var(--muted)}}
-.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:16px 0 22px}}.card{{background:#fff;border:1px solid var(--line);border-radius:13px;padding:17px;box-shadow:0 4px 12px #28101905;position:relative;overflow:hidden}}.card:before{{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--gold)}}.card-label{{font-size:12px;color:var(--muted);font-weight:700}}.card strong{{display:block;font-size:30px;line-height:1.25;margin-top:8px;color:var(--wine2)}}.card-icon{{float:right;color:var(--gold);font-size:20px}}
-.panel{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:clamp(15px,2vw,22px);margin:16px 0;box-shadow:0 5px 16px #28101905}}.panel-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:15px}}.panel h3{{margin:0;font-size:16px;color:var(--wine2)}}.panel-head small{{color:var(--muted)}}
-.filters{{display:grid;grid-template-columns:repeat(5,minmax(125px,1fr));gap:12px;align-items:end}}label{{display:block;font-size:12px;font-weight:750;color:#51434a;margin-bottom:6px}}input,select,button,.btn{{width:100%;min-height:42px;padding:9px 11px;border:1px solid #ddd2d0;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}}input:focus,select:focus{{outline:2px solid #c8a34b66;border-color:var(--gold)}}button,.btn{{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--wine);border-color:var(--wine);color:#fff;text-align:center;text-decoration:none;cursor:pointer;font-weight:750;transition:transform .15s,background .15s}}button:hover,.btn:hover{{background:var(--wine2);transform:translateY(-1px)}}.btn.gold{{background:var(--gold);border-color:var(--gold);color:#32101a}}.btn.light{{background:#fffaf1;border-color:#e6d5a9;color:var(--wine)}}.actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}}.actions .btn,.actions button{{width:auto;min-width:125px}}
-.tablewrap{{overflow:auto;border:1px solid var(--line);border-radius:9px}}table{{border-collapse:separate;border-spacing:0;width:100%;min-width:1350px;background:#fff}}th,td{{padding:12px;border-bottom:1px solid #eee8e4;text-align:left;vertical-align:top;max-width:300px;overflow-wrap:anywhere}}th{{background:#f6efe9;color:var(--wine2);font-size:11px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0}}tbody tr:hover{{background:#fffaf5}}tbody tr:last-child td{{border-bottom:0}}td{{font-size:12px}}td b{{color:#35252a}}small{{color:var(--muted)}}.status{{display:inline-block;padding:4px 8px;border-radius:99px;background:#f7edcf;color:#81580c;font-size:11px;font-weight:800}}.note{{color:var(--muted);font-size:11px;margin:12px 0 0}}.footer{{text-align:center;color:#8b7d7f;font-size:11px;padding:20px 10px}}
-@media(max-width:1100px){{.shell{{grid-template-columns:190px minmax(0,1fr)}}.filters{{grid-template-columns:repeat(3,minmax(0,1fr))}}.cards{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
-@media(max-width:700px){{.shell{{display:block}}.sidebar{{padding:12px;gap:12px}}.brand-mini{{padding:3px 5px 12px}}.nav{{display:flex;overflow:auto;gap:5px}}.nav-label,.side-note{{display:none}}.nav a{{white-space:nowrap;padding:9px 11px;margin:0}}.nav a.active{{border-left:0;border-bottom:2px solid var(--gold)}}.content{{padding:12px}}.hero{{padding:20px}}.hero .seal{{width:50px;height:50px;flex-basis:50px}}.hero-brand{{gap:11px}}.filters{{grid-template-columns:1fr 1fr}}.cards{{gap:9px}}.card{{padding:14px}}.card strong{{font-size:25px}}.topbar{{padding:11px 14px}}}}
-@media(max-width:390px){{.filters{{grid-template-columns:1fr}}.hero-brand{{align-items:flex-start}}.hero h1{{font-size:17px}}}}
-</style></head>
-<body><div class='shell'>
-<aside class='sidebar'>
-  <div class='brand-mini'>
-  <img src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/static/logo.png'
-       alt='Logo Triple 555'
-       style='width:48px;height:48px;object-fit:contain;flex-shrink:0;'>
-  <div>
-    <strong>TRIPLE 555</strong>
-    <small>Sistem Informasi Organisasi</small>
-  </div>
-</div>
-  <div class='nav-label'>MENU UTAMA</div>
-  <nav class='nav'><a class='active' href='#ringkasan'>▦ &nbsp; Dashboard</a><a href='#filter'>⌕ &nbsp; Filter Data</a><a href='#data'>▤ &nbsp; Data Survei</a><a href='#laporan'>⇩ &nbsp; Laporan</a></nav>
-  <div class='side-note'>Portal internal<br><span style='color:var(--gold-light)'>Ikatan Persaudaraan Triple 555</span></div>
-</aside>
-<div class='main'>
-  <div class='topbar'><div class='crumb'>Portal Organisasi &nbsp;›&nbsp; Dashboard Pimpinan</div><div class='user-pill'>● &nbsp; {e(username)} &nbsp; · &nbsp; Pimpinan/Admin</div></div>
-  <main class='content'>
-<header class='hero'>
-  <div class='hero-brand'>
-    <img
-      src='https://raw.githubusercontent.com/harriesfxpku/survey-gps-server/main/static/logo.png'
-      alt='Logo Ikatan Persaudaraan Triple 555'
-      style='width:76px;height:76px;object-fit:contain;flex-shrink:0;border-radius:50%;background:#fff;padding:3px;'
-    >
-    <div>
-      <div class='eyebrow'>Portal resmi organisasi</div>
-      <h1>IKATAN PERSAUDARAAN TRIPLE 555</h1>
-      <p>Sistem Informasi Survei dan Verifikasi</p>
-    </div>
-  </div>
-  <div class='hero-foot'>Dashboard Pimpinan &nbsp;•&nbsp; Rekap data survei dan hasil verifikasi</div>
-</header>
-
-    <section id='ringkasan'><div class='page-title'><div><h2>Ringkasan Data</h2><p>Pantau perkembangan survei dan verifikasi dalam satu tempat.</p></div></div>
-      <div class='cards'><div class='card'><span class='card-icon'>▤</span><div class='card-label'>TOTAL SURVEI</div><strong>{total:,}</strong></div><div class='card'><span class='card-icon'>✓</span><div class='card-label'>TERVERIFIKASI</div><strong>{verified:,}</strong></div><div class='card'><span class='card-icon'>◷</span><div class='card-label'>MENUNGGU</div><strong>{pending:,}</strong></div><div class='card'><span class='card-icon'>×</span><div class='card-label'>DITOLAK</div><strong>{rejected:,}</strong></div></div>
-    </section>
-    <section class='panel' id='filter'><div class='panel-head'><div><h3>Filter & Unduh Laporan</h3><small>Pilih kriteria untuk menyaring data yang ditampilkan.</small></div></div>
-      <form method='get' action='/pimpinan'><div class='filters'>
-      <div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{e(f['tanggal_mulai'])}'></div>
-      <div><label>TANGGAL AKHIR</label><input type='date' name='tanggal_selesai' value='{e(f['tanggal_selesai'])}'></div>
-      <div><label>DESA / WILAYAH</label><input name='wilayah' value='{e(f['wilayah'])}' placeholder='Cari wilayah'></div>
-      <div><label>PETUGAS (ID/NAMA)</label><input name='petugas' value='{e(f['petugas'])}' placeholder='Cari petugas'></div>
-      <div><label>STATUS VERIFIKASI</label><select name='status'><option value=''>Semua status</option>{options}</select></div></div>
-      <div class='actions'><button type='submit'>⌕ Terapkan Filter</button><a class='btn light' href='/pimpinan'>↺ Reset</a><a class='btn gold' id='laporan' href='/pimpinan/export/excel{export_qs}'>↓ Ekspor Excel</a><a class='btn' target='_blank' href='/pimpinan/export/pdf{export_qs}'>▣ Ekspor PDF</a></div>
-      <p class='note'>Ekspor mengikuti filter aktif. PDF dapat dicetak atau disimpan sebagai berkas PDF.</p></form>
-    </section>
-    <section class='panel' id='data'><div class='panel-head'><div><h3>Data Survei & Hasil Verifikasi</h3><small>Informasi survei, petugas, wilayah, dan catatan verifikasi.</small></div><span class='status'>{len(rows):,} DATA</span></div>
-      <div class='tablewrap'><table><thead><tr><th>ID</th><th>Petugas</th><th>Wilayah</th><th>Pemohon</th><th>Usaha</th><th>Hasil Verifikasi</th><th>Rincian Verifikasi</th><th>GPS / Waktu Survei</th></tr></thead><tbody>{''.join(table_rows) if table_rows else '<tr><td colspan="8" style="text-align:center;padding:28px">Tidak ada data yang sesuai dengan filter.</td></tr>'}</tbody></table></div>
-      <p class='note'>Data bersifat sensitif. Gunakan dan unduh laporan sesuai kewenangan organisasi.</p>
-    </section>
-    <footer class='footer'>© 2026 Ikatan Persaudaraan Triple 555 · Sistem Informasi Survei dan Verifikasi</footer>
-  </main>
-</div></div></body></html>"""
+        media = _lead_media_html(media_map.get(r["survey_id"], []))
+        if not verification:
+            detail = "<br>".join(_lead_e(x) for x in [r.get("business_type"), r.get("business_location"), "Catatan: " + str(r.get("notes") or "")] if x)
+            body.append(f"<tr><td>{r['survey_id']}</td><td>{_lead_e(r.get('surveyed_at'))}</td><td>{_lead_e(r.get('officer_name'))}<br><small>{_lead_e(r.get('member_id'))}</small></td><td>{_lead_e(r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('applicant_phone'))}<br>{_lead_e(r.get('applicant_address'))}</td><td><b>{_lead_e(r.get('business_name'))}</b><br>{detail}</td><td>{_lead_e(r.get('capital_amount'))}<br><small>Omzet: {_lead_e(r.get('turnover_amount'))}</small></td><td>{media}</td></tr>")
+        else:
+            needs = r.get("needs") or []
+            if isinstance(needs, str):
+                try: needs = json.loads(needs)
+                except ValueError: needs = []
+            needs_text = "<br>".join(_lead_e(f"{n.get('item_name','Item')}: {n.get('quantity',0)} {n.get('unit','unit')} × Rp {n.get('unit_price',0)}") for n in needs if isinstance(n, dict)) or "-"
+            body.append(f"<tr><td>{r['survey_id']}</td><td>{_lead_e(r.get('verified_at'))}</td><td>{_lead_e(r.get('verifier_name'))}<br><small>{_lead_e(r.get('verifier_id'))}</small></td><td>{_lead_e(r.get('verifier_region') or r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('business_name'))}</td><td><b>{_lead_e(r.get('decision'))}</b><br>Kondisi: {_lead_e(r.get('business_condition'))}<br>Aktivitas: {_lead_e(r.get('actual_business_activity'))}<br>Kesesuaian: {_lead_e(r.get('data_match'))}<br>Catatan: {_lead_e(r.get('verification_notes'))}<br>Alasan: {_lead_e(r.get('rejection_reason'))}</td><td>{needs_text}<br><b>Total: Rp {_lead_e(r.get('total_needs_amount'))}</b></td><td>{media}</td></tr>")
+    if not body:
+        body = ["<tr><td colspan='8' style='text-align:center'>Tidak ada data yang sesuai filter.</td></tr>"]
+    if verification:
+        heading = "Laporan Verifikasi DPS"
+        headers = "<th>ID Survei</th><th>Waktu Verifikasi</th><th>Verifikator</th><th>Wilayah DPS</th><th>Pemohon / Usaha</th><th>Hasil Pemeriksaan</th><th>Rincian Kebutuhan</th><th>Foto Verifikasi</th>"
+    else:
+        heading = "Laporan Survei DPSS"
+        headers = "<th>ID</th><th>Waktu Survei</th><th>Petugas DPSS</th><th>Desa</th><th>Pemohon</th><th>Informasi Usaha</th><th>Modal / Omzet Awal</th><th>Foto / Video Usaha</th>"
+    return f"<section class='panel'><h2>{heading} · {len(rows)} data</h2><div class='tablewrap'><table><thead><tr>{headers}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
 
 
-    return HTMLResponse(content=page)
+@app.get("/pimpinan/survei", response_class=HTMLResponse)
+def pimpinan_laporan_survei(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    filters = _lead_filters(request)
+    rows = _lead_survey_rows(filters)
+    media = _lead_media([r["survey_id"] for r in rows], verification=False)
+    content = _lead_filters_form(filters, "/pimpinan/survei", "/pimpinan/survei/export") + _lead_report_html(rows, media, False)
+    return HTMLResponse(_lead_page("Laporan Survei DPSS", username, content))
 
 
-@app.get("/pimpinan/export/excel")
-def pimpinan_export_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+@app.get("/pimpinan/verifikasi", response_class=HTMLResponse)
+def pimpinan_laporan_verifikasi(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    filters = _lead_filters(request)
+    rows = _lead_verification_rows(filters)
+    media = _lead_media([r["survey_id"] for r in rows], verification=True)
+    content = _lead_filters_form(filters, "/pimpinan/verifikasi", "/pimpinan/verifikasi/export") + _lead_report_html(rows, media, True)
+    return HTMLResponse(_lead_page("Laporan Verifikasi DPS", username, content))
+
+
+def _lead_export_excel(rows, verification, filename, sheet_title):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
-
-    f = _pimpinan_filters(request)
-    rows = _pimpinan_filtered_rows(**f)
-    headers = [
-        ("ID Survei", "survey_id"), ("ID Petugas", "member_id"), ("Nama Petugas", "officer_name"),
-        ("Tanggal Survei", "surveyed_at"), ("Wilayah", "village"), ("Nama Pemohon", "applicant_name"),
-        ("NIK", "applicant_nik"), ("Telepon", "applicant_phone"), ("Alamat", "applicant_address"),
-        ("Nama Usaha", "business_name"), ("Jenis Usaha", "business_type"), ("Lokasi Usaha", "business_location"),
-        ("Modal Awal", "capital_amount"), ("Omzet Awal", "turnover_amount"), ("Laba Awal", "net_profit_amount"),
-        ("Jumlah Pekerja Awal", "worker_count"), ("Jenis Bantuan", "assistance_types"), ("Nilai Bantuan", "assistance_amount"),
-        ("Status Verifikasi", "final_status"), ("ID Verifikator", "verifier_id"), ("Nama Verifikator", "verifier_name"),
-        ("Wilayah Verifikator", "verifier_region"), ("Waktu Verifikasi", "verified_at"), ("Kondisi Usaha", "business_condition"),
-        ("Aktivitas Usaha Aktual", "actual_business_activity"), ("Aset", "existing_assets"), ("Kesesuaian Data", "data_match"),
-        ("Catatan Perbedaan", "discrepancy_notes"), ("Catatan Verifikasi", "verification_notes"), ("Alasan Penolakan", "rejection_reason"),
-        ("Total Kebutuhan", "total_needs_amount"), ("Omzet Terverifikasi", "verified_turnover"), ("Laba Terverifikasi", "verified_profit"),
-        ("Pekerja Terverifikasi", "verified_worker_count"), ("Latitude", "latitude"), ("Longitude", "longitude"),
-    ]
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Rekap Survei Verifikasi"
-    ws.append([h for h, _ in headers])
+    if verification:
+        columns = [("ID Survei","survey_id"),("Waktu Verifikasi","verified_at"),("ID Petugas DPSS","member_id"),("Nama Petugas DPSS","officer_name"),("Desa","village"),("Nama Pemohon","applicant_name"),("Nama Usaha","business_name"),("Keputusan DPS","decision"),("ID Verifikator","verifier_id"),("Nama Verifikator","verifier_name"),("Wilayah DPS","verifier_region"),("Kondisi Usaha","business_condition"),("Aktivitas Aktual","actual_business_activity"),("Aset","existing_assets"),("Rincian Kebutuhan","needs"),("Total Kebutuhan","total_needs_amount"),("Omzet Terverifikasi","verified_turnover"),("Laba Terverifikasi","verified_profit"),("Jumlah Pekerja","verified_worker_count"),("Kesesuaian Data","data_match"),("Perbedaan","discrepancy_notes"),("Catatan Verifikasi","verification_notes"),("Alasan Penolakan","rejection_reason")]
+    else:
+        columns = [("ID Survei","survey_id"),("Waktu Survei","surveyed_at"),("ID Petugas DPSS","member_id"),("Nama Petugas DPSS","officer_name"),("Desa","village"),("Nama Pemohon","applicant_name"),("Telepon","applicant_phone"),("Alamat","applicant_address"),("Nama Usaha","business_name"),("Jenis Usaha","business_type"),("Lokasi Usaha","business_location"),("Modal Awal","capital_amount"),("Omzet Awal","turnover_amount"),("Laba Awal","net_profit_amount"),("Jumlah Pekerja","worker_count"),("Jenis Bantuan","assistance_types"),("Nilai Bantuan","assistance_amount"),("Catatan Survei","notes"),("Latitude","latitude"),("Longitude","longitude")]
+    wb=Workbook(); ws=wb.active; ws.title=sheet_title; ws.append([c[0] for c in columns])
     for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="5B1018")
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
-    for row in rows:
-        ws.append([row.get(key) for _, key in headers])
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    for index, (header, _) in enumerate(headers, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = min(max(len(header) + 3, 14), 32)
+        cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="5B1018"); cell.alignment=Alignment(wrap_text=True,vertical="top")
+    for r in rows:
+        values=[]
+        for _, key in columns:
+            value=r.get(key)
+            if key == "needs" and not isinstance(value, str): value=json.dumps(value or [], ensure_ascii=False)
+            values.append(value)
+        ws.append(values)
+    ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+    for i,(label,_) in enumerate(columns,1): ws.column_dimensions[get_column_letter(i)].width=min(max(len(label)+3,14),34)
     for row in ws.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=rekap_survei_verifikasi.xlsx"},
-    )
+        for cell in row: cell.alignment=Alignment(wrap_text=True,vertical="top")
+    out=BytesIO(); wb.save(out); out.seek(0)
+    return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename={filename}"})
 
 
-@app.get("/pimpinan/export/pdf")
-def pimpinan_export_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+def _lead_export_pdf(rows, verification, filename, title):
     from xml.sax.saxutils import escape as xml_escape
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_LEFT
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-
-    f = _pimpinan_filters(request)
-    rows = _pimpinan_filtered_rows(**f)
-    output = BytesIO()
-    doc = SimpleDocTemplate(
-        output, pagesize=landscape(A4),
-        rightMargin=18, leftMargin=18, topMargin=20, bottomMargin=20,
-        title="Rekap Survei dan Verifikasi",
-    )
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="CellSmall", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=8, alignment=TA_LEFT, spaceAfter=0))
-    styles.add(ParagraphStyle(name="HeaderSmall", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7, leading=8, textColor=colors.white, alignment=TA_LEFT))
-    story = [Paragraph("Rekap Data Survei dan Verifikasi", styles["Title"])]
-    filter_line = (
-        f"Total data: {len(rows)} | Tanggal: {xml_escape(f['tanggal_mulai'] or 'semua')} s.d. "
-        f"{xml_escape(f['tanggal_selesai'] or 'semua')} | Wilayah: {xml_escape(f['wilayah'] or 'semua')} | "
-        f"Petugas: {xml_escape(f['petugas'] or 'semua')} | Status: {xml_escape(f['status'] or 'semua')}"
-    )
-    story.extend([Paragraph(filter_line, styles["Normal"]), Spacer(1, 10)])
-
-    headers = ["ID", "Waktu survei", "Petugas", "Wilayah", "Pemohon", "Usaha", "Status / verifikator", "Rincian verifikasi"]
-    data = [[Paragraph(h, styles["HeaderSmall"]) for h in headers]]
-    def cell(value):
-        text = "" if value is None else str(value)
-        return Paragraph(xml_escape(text).replace("\n", "<br/>"), styles["CellSmall"])
+    if verification:
+        keys=[("ID","survey_id"),("Waktu verifikasi","verified_at"),("Pemohon / usaha","applicant_name"),("Keputusan","decision"),("Verifikator","verifier_name"),("Kondisi","business_condition"),("Catatan","verification_notes"),("Total kebutuhan","total_needs_amount")]
+    else:
+        keys=[("ID","survey_id"),("Waktu survei","surveyed_at"),("Petugas","officer_name"),("Desa","village"),("Pemohon","applicant_name"),("Usaha","business_name"),("Modal awal","capital_amount"),("Omzet awal","turnover_amount")]
+    out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=landscape(A4),rightMargin=20,leftMargin=20,topMargin=22,bottomMargin=22,title=title)
+    styles=getSampleStyleSheet(); styles.add(ParagraphStyle(name="LeadCell",parent=styles["BodyText"],fontSize=7,leading=8)); styles.add(ParagraphStyle(name="LeadHead",parent=styles["BodyText"],fontName="Helvetica-Bold",fontSize=7,textColor=colors.white,leading=8))
+    story=[Paragraph(xml_escape(title),styles["Title"]),Spacer(1,8),Paragraph(f"Jumlah data: {len(rows)}. Foto dan video tidak disematkan di PDF; buka dashboard untuk melihat media.",styles["Normal"]),Spacer(1,10)]
+    data=[[Paragraph(xml_escape(label),styles["LeadHead"]) for label,_ in keys]]
     for r in rows:
-        applicant = "\n".join(filter(None, [
-            str(r.get("applicant_name") or ""),
-            ("NIK: " + str(r.get("applicant_nik") or "")) if r.get("applicant_nik") else "",
-            str(r.get("applicant_phone") or ""), str(r.get("applicant_address") or "")
-        ]))
-        business = "\n".join(filter(None, [
-            str(r.get("business_name") or ""), str(r.get("business_type") or ""),
-            ("Modal: " + str(r.get("capital_amount"))) if r.get("capital_amount") is not None else "",
-            ("Omzet awal: " + str(r.get("turnover_amount"))) if r.get("turnover_amount") is not None else ""
-        ]))
-        status_detail = "\n".join(filter(None, [
-            str(r.get("final_status") or ""),
-            ("Verifikator: " + str(r.get("verifier_name") or "") + " (" + str(r.get("verifier_id") or "") + ")") if r.get("verifier_id") or r.get("verifier_name") else "",
-            ("Wilayah: " + str(r.get("verifier_region"))) if r.get("verifier_region") else "",
-            ("Waktu: " + str(r.get("verified_at"))) if r.get("verified_at") else ""
-        ]))
-        verification = "\n".join(filter(None, [
-            ("Kondisi: " + str(r.get("business_condition"))) if r.get("business_condition") else "",
-            ("Aktivitas: " + str(r.get("actual_business_activity"))) if r.get("actual_business_activity") else "",
-            ("Kesesuaian: " + str(r.get("data_match"))) if r.get("data_match") else "",
-            ("Catatan: " + str(r.get("verification_notes"))) if r.get("verification_notes") else "",
-            ("Alasan penolakan: " + str(r.get("rejection_reason"))) if r.get("rejection_reason") else "",
-            ("Total kebutuhan: " + str(r.get("total_needs_amount"))) if r.get("total_needs_amount") is not None else ""
-        ]))
-        data.append([
-            cell(r.get("survey_id")), cell(r.get("surveyed_at")),
-            cell(str(r.get("officer_name") or "") + "\n" + str(r.get("member_id") or "")),
-            cell(r.get("village")), cell(applicant), cell(business), cell(status_detail), cell(verification)
-        ])
+        vals=[]
+        for _,key in keys:
+            value=r.get(key)
+            if key=="applicant_name": value=(str(value or "")+"\n"+str(r.get("applicant_phone") or "")).strip()
+            if key=="business_name": value=(str(value or "")+"\n"+str(r.get("business_type") or "")).strip()
+            vals.append(Paragraph(xml_escape("" if value is None else str(value)).replace("\n","<br/>"),styles["LeadCell"]))
+        data.append(vals)
+    widths=[30,75,90,65,100,100,65,65] if not verification else [30,75,100,75,90,100,150,75]
+    table=Table(data,colWidths=widths,repeatRows=1,hAlign="LEFT")
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#5B1018")),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#C9C3BB")),("VALIGN",(0,0),(-1,-1),"TOP"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F8F4EC")]),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),4)]))
+    story.append(table); doc.build(story); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename={filename}"})
 
-    widths = [28, 65, 74, 58, 112, 95, 105, 180]
-    table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5B1018")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7BDC6")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F6F7F9")]),
-    ]))
-    story.append(table)
-    doc.build(story)
-    output.seek(0)
-    return StreamingResponse(
-        output,
-        media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=rekap_survei_verifikasi.pdf"},
-    )
+
+@app.get("/pimpinan/survei/export/excel")
+def pimpinan_survei_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    return _lead_export_excel(_lead_survey_rows(_lead_filters(request)),False,"laporan_survei_dpss.xlsx","Survei DPSS")
+
+@app.get("/pimpinan/survei/export/pdf")
+def pimpinan_survei_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    return _lead_export_pdf(_lead_survey_rows(_lead_filters(request)),False,"laporan_survei_dpss.pdf","Laporan Survei DPSS")
+
+@app.get("/pimpinan/verifikasi/export/excel")
+def pimpinan_verifikasi_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    return _lead_export_excel(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.xlsx","Verifikasi DPS")
+
+@app.get("/pimpinan/verifikasi/export/pdf")
+def pimpinan_verifikasi_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    return _lead_export_pdf(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.pdf","Laporan Verifikasi DPS")
 
 # =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
