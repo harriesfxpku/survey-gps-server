@@ -1831,6 +1831,290 @@ def admin_dashboard(
     return HTMLResponse(content=page)
 
 # =========================================================
+# DASHBOARD PIMPINAN + EKSPOR EXCEL/PDF
+# =========================================================
+
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBasicCredentials
+
+
+def verify_pimpinan_or_admin(
+    credentials: HTTPBasicCredentials = Depends(admin_security),
+):
+    """Izinkan login admin lama atau akun pimpinan khusus dari environment."""
+    allowed_pairs = [
+        (os.environ.get("ADMIN_USERNAME", ""), os.environ.get("ADMIN_PASSWORD", "")),
+        (os.environ.get("PIMPINAN_USERNAME", ""), os.environ.get("PIMPINAN_PASSWORD", "")),
+    ]
+    supplied_user = credentials.username.encode("utf-8")
+    supplied_password = credentials.password.encode("utf-8")
+    for expected_user, expected_password in allowed_pairs:
+        if not expected_user or not expected_password:
+            continue
+        user_ok = secrets.compare_digest(supplied_user, expected_user.encode("utf-8"))
+        password_ok = secrets.compare_digest(supplied_password, expected_password.encode("utf-8"))
+        if user_ok and password_ok:
+            return credentials.username
+    raise HTTPException(
+        status_code=401,
+        detail="Username atau kata sandi admin/pimpinan salah atau belum dikonfigurasi.",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+
+def _pimpinan_filtered_rows(tanggal_mulai="", tanggal_selesai="", wilayah="", petugas="", status=""):
+    clauses = []
+    params = []
+
+    if tanggal_mulai.strip():
+        clauses.append("NULLIF(s.surveyed_at, '')::timestamptz::date >= %s::date")
+        params.append(tanggal_mulai.strip())
+    if tanggal_selesai.strip():
+        clauses.append("NULLIF(s.surveyed_at, '')::timestamptz::date <= %s::date")
+        params.append(tanggal_selesai.strip())
+    if wilayah.strip():
+        clauses.append("COALESCE(s.village, '') ILIKE %s")
+        params.append("%" + wilayah.strip() + "%")
+    if petugas.strip():
+        clauses.append("(COALESCE(s.member_id, '') ILIKE %s OR COALESCE(o.member_name, '') ILIKE %s)")
+        params.extend(["%" + petugas.strip() + "%", "%" + petugas.strip() + "%"])
+    if status.strip():
+        clauses.append("COALESCE(v.decision, s.verification_status, 'Belum diverifikasi') = %s")
+        params.append(status.strip())
+
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = """
+        SELECT
+            s.id AS survey_id, s.member_id, COALESCE(o.member_name, s.member_id) AS officer_name,
+            s.surveyed_at, s.received_at, s.village, s.applicant_name, s.applicant_nik,
+            s.applicant_phone, s.applicant_address, s.business_name, s.business_type,
+            s.business_location, s.capital_amount, s.turnover_amount, s.net_profit_amount,
+            s.worker_count, s.assistance_types, s.assistance_amount,
+            COALESCE(v.decision, s.verification_status, 'Belum diverifikasi') AS final_status,
+            v.verifier_id, v.verifier_name, v.verifier_region, v.verified_at,
+            v.business_condition, v.actual_business_activity, v.existing_assets,
+            v.data_match, v.discrepancy_notes, v.verification_notes, v.rejection_reason,
+            v.total_needs_amount, v.verified_turnover, v.verified_profit, v.verified_worker_count,
+            s.latitude, s.longitude
+        FROM surveys s
+        LEFT JOIN survey_verifications v ON v.survey_id = s.id
+        LEFT JOIN officers o ON o.member_id = s.member_id
+    """ + where_sql + " ORDER BY s.id DESC"
+
+    with get_db() as connection:
+        return [dict(row) for row in connection.execute(sql, tuple(params)).fetchall()]
+
+
+def _pimpinan_filters(request):
+    return {
+        "tanggal_mulai": request.query_params.get("tanggal_mulai", "").strip(),
+        "tanggal_selesai": request.query_params.get("tanggal_selesai", "").strip(),
+        "wilayah": request.query_params.get("wilayah", "").strip(),
+        "petugas": request.query_params.get("petugas", "").strip(),
+        "status": request.query_params.get("status", "").strip(),
+    }
+
+
+def _pimpinan_qs(filters):
+    from urllib.parse import urlencode
+    return urlencode({k: v for k, v in filters.items() if v})
+
+
+def _pimpinan_summary(rows):
+    total = len(rows)
+    verified = sum(1 for r in rows if r.get("final_status") == "Sudah diverifikasi")
+    rejected = sum(1 for r in rows if r.get("final_status") == "Ditolak")
+    pending = total - verified - rejected
+    return total, verified, pending, rejected
+
+
+@app.get("/pimpinan", response_class=HTMLResponse)
+def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    f = _pimpinan_filters(request)
+    rows = _pimpinan_filtered_rows(**f)
+    total, verified, pending, rejected = _pimpinan_summary(rows)
+    qs = _pimpinan_qs(f)
+
+    def e(value):
+        return escape("" if value is None else str(value), quote=True)
+
+    table_rows = []
+    for r in rows:
+        gps = f"{r.get('latitude') or ''}, {r.get('longitude') or ''}"
+        table_rows.append(
+            "<tr>"
+            f"<td>{e(r.get('survey_id'))}</td>"
+            f"<td>{e(r.get('officer_name'))}<br><small>{e(r.get('member_id'))}</small></td>"
+            f"<td>{e(r.get('village'))}</td>"
+            f"<td><b>{e(r.get('applicant_name'))}</b><br>NIK: {e(r.get('applicant_nik'))}<br>HP: {e(r.get('applicant_phone'))}<br>{e(r.get('applicant_address'))}</td>"
+            f"<td><b>{e(r.get('business_name'))}</b><br>{e(r.get('business_type'))}<br>Modal: {e(r.get('capital_amount'))}<br>Omzet awal: {e(r.get('turnover_amount'))}</td>"
+            f"<td><b>{e(r.get('final_status'))}</b><br>Verifikator: {e(r.get('verifier_name'))} ({e(r.get('verifier_id'))})<br>Wilayah verifikasi: {e(r.get('verifier_region'))}<br>Waktu: {e(r.get('verified_at'))}</td>"
+            f"<td>{e(r.get('business_condition'))}<br>Aktivitas: {e(r.get('actual_business_activity'))}<br>Kesesuaian: {e(r.get('data_match'))}<br>Catatan: {e(r.get('verification_notes'))}<br>Alasan penolakan: {e(r.get('rejection_reason'))}<br>Total kebutuhan: {e(r.get('total_needs_amount'))}</td>"
+            f"<td><a target='_blank' rel='noopener' href='https://www.google.com/maps?q={e(gps)}'>Buka peta</a><br>{e(r.get('surveyed_at'))}</td>"
+            "</tr>"
+        )
+
+    options = "".join(
+        f"<option value='{e(v)}' {'selected' if f['status'] == v else ''}>{e(v)}</option>"
+        for v in ["Sudah diverifikasi", "Belum diverifikasi", "Perlu ditinjau", "Ditolak"]
+    )
+    export_qs = ("?" + qs) if qs else ""
+    page = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>Dashboard Pimpinan | Survei GPS</title>
+<style>
+*{{box-sizing:border-box}}body{{margin:0;background:#f4f5f7;color:#202532;font:14px/1.5 system-ui,Segoe UI,Arial,sans-serif}}.wrap{{max-width:1600px;margin:auto;padding:22px}}header{{background:#5b1018;color:white;padding:24px;border-radius:14px}}h1{{margin:0 0 5px}}.cards{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}}.card,.panel{{background:white;border:1px solid #e1e4e8;border-radius:12px;padding:16px}}.card strong{{display:block;font-size:26px}}.filters{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;align-items:end}}label{{display:block;font-weight:650;margin-bottom:4px}}input,select,button,.btn{{width:100%;min-height:40px;padding:8px 10px;border:1px solid #cbd0d8;border-radius:8px;font:inherit}}button,.btn{{display:inline-block;background:#5b1018;color:white;text-align:center;text-decoration:none;cursor:pointer;font-weight:700}}.btn.secondary{{background:#e9edf2;color:#202532}}.actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}}.actions .btn{{width:auto}}.tablewrap{{overflow:auto;margin-top:15px}}table{{border-collapse:collapse;width:100%;min-width:1350px;background:white}}th,td{{padding:10px;border-bottom:1px solid #e3e6eb;text-align:left;vertical-align:top;max-width:300px;overflow-wrap:anywhere}}th{{background:#f0f2f5;position:sticky;top:0}}small{{color:#657083}}.note{{color:#657083;font-size:12px}}@media(max-width:800px){{.wrap{{padding:10px}}.cards{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:1fr 1fr}}}}
+</style></head><body><main class='wrap'><header><h1>Dashboard Pimpinan</h1><div>Rekap survei dan hasil verifikasi Survei GPS</div><div class='note' style='color:#f5dfe2'>Akses dilindungi login admin. Dashboard ini tidak menyediakan fungsi menghapus atau mengubah data.</div></header>
+<div class='cards'><div class='card'>Total data<strong>{total}</strong></div><div class='card'>Sudah diverifikasi<strong>{verified}</strong></div><div class='card'>Belum selesai<strong>{pending}</strong></div><div class='card'>Ditolak<strong>{rejected}</strong></div></div>
+<section class='panel'><form method='get' action='/pimpinan'><div class='filters'>
+<div><label>Tanggal survei mulai</label><input type='date' name='tanggal_mulai' value='{e(f['tanggal_mulai'])}'></div>
+<div><label>Tanggal survei sampai</label><input type='date' name='tanggal_selesai' value='{e(f['tanggal_selesai'])}'></div>
+<div><label>Desa / wilayah</label><input name='wilayah' value='{e(f['wilayah'])}' placeholder='Cari wilayah'></div>
+<div><label>Petugas (ID/nama)</label><input name='petugas' value='{e(f['petugas'])}' placeholder='Cari petugas'></div>
+<div><label>Status verifikasi</label><select name='status'><option value=''>Semua status</option>{options}</select></div></div>
+<div class='actions'><button type='submit' style='width:auto'>Terapkan Filter</button><a class='btn secondary' href='/pimpinan'>Reset</a><a class='btn' href='/pimpinan/export/excel{export_qs}'>Ekspor Excel (.xlsx)</a><a class='btn' target='_blank' href='/pimpinan/export/pdf{export_qs}'>Cetak / Simpan PDF</a></div>
+<p class='note'>Ekspor mengikuti filter yang sedang aktif. Untuk PDF, halaman laporan akan terbuka, lalu pilih Cetak / Simpan sebagai PDF.</p></form></section>
+<section class='panel'><b>{len(rows)} data ditampilkan</b><div class='tablewrap'><table><thead><tr><th>ID</th><th>Petugas</th><th>Wilayah</th><th>Pemohon</th><th>Usaha</th><th>Hasil verifikasi</th><th>Rincian verifikasi</th><th>GPS / waktu survei</th></tr></thead><tbody>{''.join(table_rows) if table_rows else '<tr><td colspan="8">Tidak ada data sesuai filter.</td></tr>'}</tbody></table></div></section>
+</main></body></html>"""
+    return HTMLResponse(content=page)
+
+
+@app.get("/pimpinan/export/excel")
+def pimpinan_export_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    f = _pimpinan_filters(request)
+    rows = _pimpinan_filtered_rows(**f)
+    headers = [
+        ("ID Survei", "survey_id"), ("ID Petugas", "member_id"), ("Nama Petugas", "officer_name"),
+        ("Tanggal Survei", "surveyed_at"), ("Wilayah", "village"), ("Nama Pemohon", "applicant_name"),
+        ("NIK", "applicant_nik"), ("Telepon", "applicant_phone"), ("Alamat", "applicant_address"),
+        ("Nama Usaha", "business_name"), ("Jenis Usaha", "business_type"), ("Lokasi Usaha", "business_location"),
+        ("Modal Awal", "capital_amount"), ("Omzet Awal", "turnover_amount"), ("Laba Awal", "net_profit_amount"),
+        ("Jumlah Pekerja Awal", "worker_count"), ("Jenis Bantuan", "assistance_types"), ("Nilai Bantuan", "assistance_amount"),
+        ("Status Verifikasi", "final_status"), ("ID Verifikator", "verifier_id"), ("Nama Verifikator", "verifier_name"),
+        ("Wilayah Verifikator", "verifier_region"), ("Waktu Verifikasi", "verified_at"), ("Kondisi Usaha", "business_condition"),
+        ("Aktivitas Usaha Aktual", "actual_business_activity"), ("Aset", "existing_assets"), ("Kesesuaian Data", "data_match"),
+        ("Catatan Perbedaan", "discrepancy_notes"), ("Catatan Verifikasi", "verification_notes"), ("Alasan Penolakan", "rejection_reason"),
+        ("Total Kebutuhan", "total_needs_amount"), ("Omzet Terverifikasi", "verified_turnover"), ("Laba Terverifikasi", "verified_profit"),
+        ("Pekerja Terverifikasi", "verified_worker_count"), ("Latitude", "latitude"), ("Longitude", "longitude"),
+    ]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Rekap Survei Verifikasi"
+    ws.append([h for h, _ in headers])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="5B1018")
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+    for row in rows:
+        ws.append([row.get(key) for _, key in headers])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for index, (header, _) in enumerate(headers, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = min(max(len(header) + 3, 14), 32)
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=rekap_survei_verifikasi.xlsx"},
+    )
+
+
+@app.get("/pimpinan/export/pdf")
+def pimpinan_export_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    from xml.sax.saxutils import escape as xml_escape
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+    f = _pimpinan_filters(request)
+    rows = _pimpinan_filtered_rows(**f)
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output, pagesize=landscape(A4),
+        rightMargin=18, leftMargin=18, topMargin=20, bottomMargin=20,
+        title="Rekap Survei dan Verifikasi",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="CellSmall", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=8, alignment=TA_LEFT, spaceAfter=0))
+    styles.add(ParagraphStyle(name="HeaderSmall", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7, leading=8, textColor=colors.white, alignment=TA_LEFT))
+    story = [Paragraph("Rekap Data Survei dan Verifikasi", styles["Title"])]
+    filter_line = (
+        f"Total data: {len(rows)} | Tanggal: {xml_escape(f['tanggal_mulai'] or 'semua')} s.d. "
+        f"{xml_escape(f['tanggal_selesai'] or 'semua')} | Wilayah: {xml_escape(f['wilayah'] or 'semua')} | "
+        f"Petugas: {xml_escape(f['petugas'] or 'semua')} | Status: {xml_escape(f['status'] or 'semua')}"
+    )
+    story.extend([Paragraph(filter_line, styles["Normal"]), Spacer(1, 10)])
+
+    headers = ["ID", "Waktu survei", "Petugas", "Wilayah", "Pemohon", "Usaha", "Status / verifikator", "Rincian verifikasi"]
+    data = [[Paragraph(h, styles["HeaderSmall"]) for h in headers]]
+    def cell(value):
+        text = "" if value is None else str(value)
+        return Paragraph(xml_escape(text).replace("\n", "<br/>"), styles["CellSmall"])
+    for r in rows:
+        applicant = "\n".join(filter(None, [
+            str(r.get("applicant_name") or ""),
+            ("NIK: " + str(r.get("applicant_nik") or "")) if r.get("applicant_nik") else "",
+            str(r.get("applicant_phone") or ""), str(r.get("applicant_address") or "")
+        ]))
+        business = "\n".join(filter(None, [
+            str(r.get("business_name") or ""), str(r.get("business_type") or ""),
+            ("Modal: " + str(r.get("capital_amount"))) if r.get("capital_amount") is not None else "",
+            ("Omzet awal: " + str(r.get("turnover_amount"))) if r.get("turnover_amount") is not None else ""
+        ]))
+        status_detail = "\n".join(filter(None, [
+            str(r.get("final_status") or ""),
+            ("Verifikator: " + str(r.get("verifier_name") or "") + " (" + str(r.get("verifier_id") or "") + ")") if r.get("verifier_id") or r.get("verifier_name") else "",
+            ("Wilayah: " + str(r.get("verifier_region"))) if r.get("verifier_region") else "",
+            ("Waktu: " + str(r.get("verified_at"))) if r.get("verified_at") else ""
+        ]))
+        verification = "\n".join(filter(None, [
+            ("Kondisi: " + str(r.get("business_condition"))) if r.get("business_condition") else "",
+            ("Aktivitas: " + str(r.get("actual_business_activity"))) if r.get("actual_business_activity") else "",
+            ("Kesesuaian: " + str(r.get("data_match"))) if r.get("data_match") else "",
+            ("Catatan: " + str(r.get("verification_notes"))) if r.get("verification_notes") else "",
+            ("Alasan penolakan: " + str(r.get("rejection_reason"))) if r.get("rejection_reason") else "",
+            ("Total kebutuhan: " + str(r.get("total_needs_amount"))) if r.get("total_needs_amount") is not None else ""
+        ]))
+        data.append([
+            cell(r.get("survey_id")), cell(r.get("surveyed_at")),
+            cell(str(r.get("officer_name") or "") + "\n" + str(r.get("member_id") or "")),
+            cell(r.get("village")), cell(applicant), cell(business), cell(status_detail), cell(verification)
+        ])
+
+    widths = [28, 65, 74, 58, 112, 95, 105, 180]
+    table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5B1018")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B7BDC6")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F6F7F9")]),
+    ]))
+    story.append(table)
+    doc.build(story)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=rekap_survei_verifikasi.pdf"},
+    )
+
+# =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
 # =========================================================
 
