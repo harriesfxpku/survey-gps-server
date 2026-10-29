@@ -50,7 +50,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.2.1-multivillage-fix1",
+    version="3.2.2-dps-district-surveys-fix",
 )
 
 app.add_middleware(
@@ -313,13 +313,23 @@ def get_village_bucket(connection, village_id):
 
 
 def ensure_dps_survey_access(connection, identity, survey_id):
-    row = connection.execute("""SELECT s.id FROM surveys s
-        JOIN officer_villages ov ON ov.village_id = s.village_id
-        JOIN officers o ON o.id = ov.officer_id
-        WHERE s.id = %s AND o.member_id = %s AND o.active = 1""",
-        (survey_id, identity["member_id"])).fetchone()
+    # DPS (Kecamatan) dapat membuka survei dari desa di kecamatannya.
+    # Penugasan desa eksplisit tetap didukung untuk menjaga kompatibilitas.
+    row = connection.execute("""SELECT s.id
+        FROM surveys s
+        LEFT JOIN villages v ON v.id = s.village_id
+        JOIN officers o ON o.member_id = %s AND o.active = 1
+        WHERE s.id = %s
+          AND (
+            EXISTS (
+                SELECT 1 FROM officer_villages ov
+                WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
+            )
+            OR lower(trim(coalesce(v.district, ''))) =
+               regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+          )""", (identity["member_id"], survey_id)).fetchone()
     if row is None:
-        raise HTTPException(status_code=403, detail="Survei ini bukan dari desa yang ditugaskan kepada akun DPS.")
+        raise HTTPException(status_code=403, detail="Survei ini berada di luar wilayah kecamatan akun DPS.")
 
 
 @app.on_event("startup")
@@ -1007,18 +1017,24 @@ def list_surveys_for_verification(
 ):
     """Daftar survei awal yang dapat dibuka petugas DPS untuk verifikasi."""
     with get_db() as connection:
-        if include_completed:
-            rows = connection.execute("""SELECT s.* FROM surveys s
-                JOIN officer_villages ov ON ov.village_id = s.village_id
-                JOIN officers o ON o.id = ov.officer_id
-                WHERE o.member_id = %s AND o.active = 1 ORDER BY s.id DESC""", (identity["member_id"],)).fetchall()
-        else:
-            rows = connection.execute("""SELECT s.* FROM surveys s
-                JOIN officer_villages ov ON ov.village_id = s.village_id
-                JOIN officers o ON o.id = ov.officer_id
-                WHERE o.member_id = %s AND o.active = 1
-                AND COALESCE(s.verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')
-                ORDER BY s.id DESC""", (identity["member_id"],)).fetchall()
+        # DPS melihat survei dari seluruh desa dalam kecamatan pada akun DPS.
+        # Penugasan desa manual yang sudah ada juga tetap dihormati.
+        base_query = """SELECT DISTINCT s.*
+            FROM surveys s
+            LEFT JOIN villages v ON v.id = s.village_id
+            JOIN officers o ON o.member_id = %s AND o.active = 1
+            WHERE (
+                EXISTS (
+                    SELECT 1 FROM officer_villages ov
+                    WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
+                )
+                OR lower(trim(coalesce(v.district, ''))) =
+                   regexp_replace(lower(trim(coalesce(o.region, ''))), '^kecamatan[[:space:]]+', '')
+            )"""
+        if not include_completed:
+            base_query += " AND COALESCE(s.verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')"
+        base_query += " ORDER BY s.id DESC"
+        rows = connection.execute(base_query, (identity["member_id"],)).fetchall()
     return [dict(row) for row in rows]
 
 
