@@ -1909,7 +1909,7 @@ def _lead_verification_rows(filters):
         return [dict(r) for r in connection.execute(sql, params).fetchall()]
 
 
-def _lead_media(survey_ids, verification=False):
+def _lead_media(survey_ids, verification=False, include_identity=False):
     if not survey_ids:
         return {}
     table = "verification_media" if verification else "survey_media"
@@ -1923,8 +1923,10 @@ def _lead_media(survey_ids, verification=False):
     for item in rows:
         item = dict(item)
         category = str(item.get("media_category") or "business_photo").lower()
-        # Dokumen identitas pribadi tidak ditampilkan di laporan pimpinan.
-        if any(word in category for word in ("ktp", "kk", "identity", "face", "selfie", "document", "dokumen")):
+        # Dokumen identitas hanya boleh muncul pada halaman dashboard survei.
+        # Tetap dikecualikan dari laporan verifikasi dan ekspor.
+        is_identity = any(word in category for word in ("ktp", "kk", "identity", "face", "selfie", "document", "dokumen"))
+        if is_identity and (verification or not include_identity):
             continue
         url = create_supabase_signed_url(item["object_path"], bucket=item.get("storage_bucket") or "survey-media")
         item["signed_url"] = url
