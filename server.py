@@ -62,15 +62,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/logo.png")
-def get_logo():
-    # Logo utama berada di static/logo.png pada repository.
+@app.get("/.png")
+def get_():
+    #  utama berada di static/.png pada repository.
     base_dir = Path(__file__).parent
-    candidates = [base_dir / "static" / "logo.png", base_dir / "logo.png"]
-    logo_path = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if logo_path is None:
-        raise HTTPException(status_code=404, detail="Logo tidak ditemukan di static/logo.png")
-    return FileResponse(logo_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+    candidates = [base_dir / "static" / ".png", base_dir / ".png"]
+    _path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if _path is None:
+        raise HTTPException(status_code=404, detail=" tidak ditemukan di static/.png")
+    return FileResponse(_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 # =========================================================
 # KONEKSI DATABASE
@@ -2247,7 +2247,7 @@ def public_member_registration_form():
     label{{display:block;font-weight:650;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:11px;border:1px solid #d5cec7;border-radius:8px;font:inherit;background:white}}
     input[type=file]{{padding:8px}}.full{{grid-column:1/-1}}.hint{{font-size:13px;color:#6b625c;margin:5px 0}}button{{background:var(--maroon);color:white;border:0;border-radius:9px;padding:13px 20px;font:inherit;font-weight:700;cursor:pointer}}
     .notice{{background:#fff7e5;border-left:4px solid var(--gold);padding:12px;border-radius:7px;font-size:13px}}.hp{{position:absolute;left:-10000px}}
-    @media(max-width:620px){{header .brand img{{width:58px;height:58px}}header .brand h1{{font-size:20px}}.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
+    header .brand img{{width:76px;height:76px;object-fit:contain;background:transparent;padding:0;border:0;border-radius:0}}@media(max-width:620px){{header .brand img{{width:58px;height:58px}}header .brand h1{{font-size:20px}}.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
     </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Pendataan Mandiri Anggota</h1><p>Ikatan Persaudaraan Triple 555</p></div></div></header>
     <main><div class='panel'><div class='notice'><b>Petunjuk:</b> Formulir ini diisi oleh masing-masing anggota. Data akan diperiksa admin sebelum ditetapkan sebagai data resmi organisasi. Pastikan NIK dan nomor HP benar. Foto KTP hanya dapat diakses admin yang berwenang.</div>
     <form method='post' action='/pendaftaran-anggota' enctype='multipart/form-data'>
