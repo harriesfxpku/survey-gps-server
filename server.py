@@ -51,7 +51,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.2.2-dps-district-surveys-fix",
+    version="3.3.0-personnel-profiles-and-leadership-dashboard",
 )
 
 app.add_middleware(
@@ -296,6 +296,20 @@ def initialize_database():
             officer_id BIGINT NOT NULL REFERENCES officers(id) ON DELETE CASCADE,
             village_id BIGINT NOT NULL REFERENCES villages(id) ON DELETE CASCADE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (officer_id, village_id))""")
+        # Profil personel terpisah dari kredensial akun. Dokumen disimpan di bucket privat.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS officer_profiles (
+                officer_id BIGINT PRIMARY KEY REFERENCES officers(id) ON DELETE CASCADE,
+                nik VARCHAR(30) NOT NULL DEFAULT '',
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                address TEXT NOT NULL DEFAULT '',
+                birth_place VARCHAR(100) NOT NULL DEFAULT '',
+                birth_date DATE,
+                profile_photo_path TEXT NOT NULL DEFAULT '',
+                ktp_path TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         connection.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS village_id BIGINT REFERENCES villages(id)")
         connection.execute("ALTER TABLE survey_media ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(100) NOT NULL DEFAULT 'survey-media'")
         connection.execute("ALTER TABLE verification_media ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(100) NOT NULL DEFAULT 'survey-media'")
@@ -1970,8 +1984,159 @@ def _lead_page(title, username, content):
 @media(max-width:700px){{.lead-photo-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 @media(max-width:420px){{.lead-photo-grid{{grid-template-columns:1fr}}.lead-photo-image{{height:auto;max-height:280px;object-fit:contain}}}}
 
-footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+ .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#fff;border:1px solid var(--line);border-left:4px solid var(--gold);border-radius:13px;padding:14px;box-shadow:0 3px 12px #2b1b0808}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#f2eee7}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:var(--muted);font-size:11px}}.person-info h3{{margin:0 0 3px;color:var(--maroon)}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#e3f4e8;color:#176534}}.status.inactive{{background:#fff0df;color:#8a4b08}}footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/personel'>Data Personel</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+
+
+
+# =========================================================
+# MODUL PROFIL PERSONEL DPS / DPSS
+# =========================================================
+
+def _officer_private_bucket():
+    return os.environ.get("SUPABASE_OFFICER_BUCKET", "officer-private").strip() or "officer-private"
+
+
+def _upload_officer_private(file: UploadFile | None, member_id: str, kind: str) -> str:
+    if file is None or not file.filename:
+        return ""
+    content_type = (file.content_type or "").lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"{kind}: berkas harus berupa gambar.")
+    data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{kind}: berkas kosong.")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"{kind}: ukuran maksimal 5 MB.")
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Penyimpanan dokumen personel belum dikonfigurasi.")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg" if content_type == "image/jpeg" else ".png" if content_type == "image/png" else ".webp"
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", member_id)
+    object_path = f"{safe_id}/{kind}-{uuid.uuid4().hex}{ext}"
+    bucket = _officer_private_bucket()
+    upload_url = f"{supabase_url}/storage/v1/object/{quote(bucket, safe='')}/{quote(object_path, safe='/')}"
+    req = urllib.request.Request(
+        upload_url, data=data,
+        headers={
+            "Authorization": f"Bearer {supabase_key}",
+            "apikey": supabase_key,
+            "Content-Type": content_type or "application/octet-stream",
+            "x-upsert": "false",
+        }, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")[:500]
+        raise HTTPException(status_code=502, detail=f"Gagal mengunggah {kind} ke penyimpanan privat: {detail}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail=f"Koneksi penyimpanan {kind} gagal: {exc}")
+    return object_path
+
+
+def _officer_profile_rows(search_text=""):
+    with get_db() as connection:
+        return connection.execute("""
+            SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+                   COALESCE(p.nik,'') AS nik, COALESCE(p.phone,'') AS phone,
+                   COALESCE(p.address,'') AS address,
+                   COALESCE(p.birth_place,'') AS birth_place, p.birth_date,
+                   COALESCE(p.profile_photo_path,'') AS profile_photo_path,
+                   COALESCE(p.ktp_path,'') AS ktp_path,
+                   COALESCE(string_agg(DISTINCT v.village_name, ', '), '') AS villages
+            FROM officers o
+            LEFT JOIN officer_profiles p ON p.officer_id=o.id
+            LEFT JOIN officer_villages ov ON ov.officer_id=o.id
+            LEFT JOIN villages v ON v.id=ov.village_id
+            WHERE (%s = '' OR o.member_id ILIKE %s OR o.member_name ILIKE %s
+                   OR COALESCE(p.phone,'') ILIKE %s OR COALESCE(o.region,'') ILIKE %s
+                   OR COALESCE(v.village_name,'') ILIKE %s)
+            GROUP BY o.id, p.officer_id
+            ORDER BY CASE WHEN o.role='DPS' THEN 0 ELSE 1 END, o.member_name
+        """, (search_text, f"%{search_text}%", f"%{search_text}%",
+              f"%{search_text}%", f"%{search_text}%", f"%{search_text}%")).fetchall()
+
+
+@app.get("/admin/data-personel", response_class=HTMLResponse)
+def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
+    rows = _officer_profile_rows(q.strip())
+    body = []
+    for r in rows:
+        status = "Aktif" if r["active"] == 1 else "Belum aktif"
+        photo = create_supabase_signed_url(r["profile_photo_path"], bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
+        photo_html = f"<img class='avatar' src='{_lead_e(photo)}'>" if photo else "<div class='avatar blank'>Foto<br>belum ada</div>"
+        body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(r['region'] or r['villages'] or '-')}<br><small>{_lead_e(r['villages'])}</small></td><td>{status}</td><td><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Profil</a></td></tr>""")
+    if not body:
+        body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
+    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
+    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin'>Dashboard Admin</a> <a class='btn' href='/pimpinan'>Dashboard Pimpinan</a></p><section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/admin/data-personel/{officer_id}", response_class=HTMLResponse)
+def admin_edit_data_personel(officer_id: int, username: str = Depends(verify_admin)):
+    with get_db() as connection:
+        row = connection.execute("""
+            SELECT o.id AS officer_id,o.member_id,o.member_name,o.role,o.region,o.active,
+                   p.nik,p.phone,p.address,p.birth_place,p.birth_date,p.profile_photo_path,p.ktp_path
+            FROM officers o LEFT JOIN officer_profiles p ON p.officer_id=o.id WHERE o.id=%s
+        """, (officer_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+    photo = create_supabase_signed_url(row["profile_photo_path"], bucket=_officer_private_bucket()) if row["profile_photo_path"] else None
+    ktp = create_supabase_signed_url(row["ktp_path"], bucket=_officer_private_bucket()) if row["ktp_path"] else None
+    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Edit Profil Personel</title><style>body{{font:14px system-ui;background:#f6f3ee;margin:0}}header{{background:#31090e;color:white;padding:20px}}main{{max-width:850px;margin:auto;padding:20px}}form,.panel{{background:white;padding:20px;border-radius:12px}}label{{display:block;font-weight:bold;margin:12px 0 5px}}input,textarea{{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;box-sizing:border-box}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}button,.btn{{display:inline-block;background:#5b1018;color:white;padding:10px 14px;border:0;border-radius:8px;text-decoration:none;margin-top:16px}}img{{max-width:180px;max-height:180px;object-fit:contain;margin:8px}}small{{color:#777}}@media(max-width:600px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><h1>Profil Personel</h1><div>{_lead_e(row['member_name'])} · {_lead_e(row['member_id'])} · {_lead_e(row['role'])}</div></header><main><p><a class='btn' href='/admin/data-personel'>Kembali ke daftar</a></p><form method='post' enctype='multipart/form-data' action='/admin/data-personel/{officer_id}'><div class='grid'><div><label>Nama lengkap</label><input value='{_lead_e(row['member_name'])}' disabled></div><div><label>Nomor identitas anggota</label><input value='{_lead_e(row['member_id'])}' disabled></div><div><label>NIK</label><input name='nik' value='{_lead_e(row['nik'] or '')}' maxlength='30'></div><div><label>Nomor HP</label><input name='phone' value='{_lead_e(row['phone'] or '')}' maxlength='30' required></div><div><label>Tempat lahir</label><input name='birth_place' value='{_lead_e(row['birth_place'] or '')}'></div><div><label>Tanggal lahir</label><input type='date' name='birth_date' value='{_lead_e(row['birth_date'].isoformat() if row['birth_date'] else '')}'></div></div><label>Alamat</label><textarea name='address' rows='3'>{_lead_e(row['address'] or '')}</textarea><label>Foto diri (JPG/PNG/WEBP, maks. 5 MB)</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src=\"{_lead_e(photo)}\">' if photo else '<small>Belum ada foto profil.</small>'}<label>Foto/scan KTP (JPG/PNG/WEBP, maks. 5 MB)</label><input type='file' name='ktp_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src=\"{_lead_e(ktp)}\">' if ktp else '<small>Belum ada dokumen KTP.</small>'}<p><button type='submit'>Simpan Profil</button></p></form></main></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.post("/admin/data-personel/{officer_id}")
+def admin_save_data_personel(
+    officer_id: int,
+    nik: str = Form(""), phone: str = Form(""), address: str = Form(""),
+    birth_place: str = Form(""), birth_date: str = Form(""),
+    profile_photo: UploadFile | None = File(None), ktp_photo: UploadFile | None = File(None),
+    username: str = Depends(verify_admin),
+):
+    with get_db() as connection:
+        officer = connection.execute("SELECT id,member_id FROM officers WHERE id=%s", (officer_id,)).fetchone()
+    if not officer:
+        raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+    photo_path = _upload_officer_private(profile_photo, officer["member_id"], "profile") if profile_photo and profile_photo.filename else ""
+    ktp_path = _upload_officer_private(ktp_photo, officer["member_id"], "ktp") if ktp_photo and ktp_photo.filename else ""
+    with get_db() as connection:
+        connection.execute("""
+            INSERT INTO officer_profiles (officer_id,nik,phone,address,birth_place,birth_date,profile_photo_path,ktp_path,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (officer_id) DO UPDATE SET
+              nik=EXCLUDED.nik, phone=EXCLUDED.phone, address=EXCLUDED.address,
+              birth_place=EXCLUDED.birth_place, birth_date=EXCLUDED.birth_date,
+              profile_photo_path=CASE WHEN EXCLUDED.profile_photo_path='' THEN officer_profiles.profile_photo_path ELSE EXCLUDED.profile_photo_path END,
+              ktp_path=CASE WHEN EXCLUDED.ktp_path='' THEN officer_profiles.ktp_path ELSE EXCLUDED.ktp_path END,
+              updated_at=NOW()
+        """, (officer_id, nik.strip(), phone.strip(), address.strip(), birth_place.strip(),
+              birth_date.strip() or None, photo_path, ktp_path))
+    return RedirectResponse(url=f"/admin/data-personel/{officer_id}?saved=1", status_code=303)
+
+
+@app.get("/pimpinan/personel", response_class=HTMLResponse)
+def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
+    rows = _officer_profile_rows(q.strip())
+    cards = []
+    for r in rows:
+        photo = create_supabase_signed_url(r["profile_photo_path"], expires_in=1800, bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
+        avatar = f"<img class='person-photo' src='{_lead_e(photo)}' alt='Foto {_lead_e(r['member_name'])}'>" if photo else "<div class='person-photo no-photo'>Foto<br>belum ada</div>"
+        territory = r["villages"] or r["region"] or "-"
+        status = "<span class='status active'>AKTIF</span>" if r["active"] == 1 else "<span class='status inactive'>BELUM AKTIF</span>"
+        cards.append(f"""<article class='person-card'>{avatar}<div class='person-info'><h3>{_lead_e(r['member_name'])}</h3><div class='muted'>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</div><p>☎ {_lead_e(r['phone'] or 'Nomor HP belum diisi')}</p><p>⌖ {_lead_e(territory)}</p>{status}</div></article>""")
+    if not cards:
+        cards = ["<div class='panel'>Belum ada akun personel yang sesuai.</div>"]
+    content = f"""<section class='panel'><form method='get'><label>Cari personel</label><input name='q' value='{_lead_e(q)}' placeholder='Nama, ID, nomor HP, wilayah'><button type='submit'>Cari</button> <a class='btn light' href='/pimpinan/personel'>Reset</a></form><p class='muted'>Total akun terdaftar: {len(rows)}. KTP dan data identitas rinci tidak ditampilkan pada daftar pimpinan.</p></section><section class='people-grid'>{''.join(cards)}</section>"""
+    return HTMLResponse(_lead_page("Data Personel DPS dan DPSS", username, content))
 
 
 @app.get("/pimpinan", response_class=HTMLResponse)
@@ -1982,6 +2147,7 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
     pending = max(0, len(surveys) - len(verifications))
     content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
 <section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
+<section class='cards'><article class='report-card'><h2>👥 Data Personel DPS dan DPSS</h2><p>Daftar nama, foto diri, nomor HP, wilayah penugasan, dan status akun seluruh petugas. Dokumen KTP tidak ditampilkan pada daftar pimpinan.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Personel</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Pengisian profil lengkap, nomor HP, alamat, foto diri, dan dokumen KTP dilakukan melalui dashboard admin khusus.</p><a class='btn' href='/admin/data-personel'>Buka Pendataan Personel</a></article></section>
 <section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
     return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
 
