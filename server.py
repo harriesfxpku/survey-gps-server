@@ -51,7 +51,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.3.0-personnel-profiles-and-leadership-dashboard",
+    version="3.4.0-leadership-gps-map-and-personnel-dashboard",
 )
 
 app.add_middleware(
@@ -1901,7 +1901,7 @@ def _lead_survey_rows(filters):
         s.surveyed_at, s.received_at, s.village, s.applicant_name, s.applicant_phone, s.applicant_address,
         s.business_name, s.business_type, s.business_location, s.capital_amount, s.turnover_amount,
         s.net_profit_amount, s.worker_count, s.assistance_types, s.assistance_amount, s.notes,
-        s.latitude, s.longitude
+        s.latitude, s.longitude, s.accuracy
         FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id""" + where_sql + " ORDER BY s.id DESC"
     with get_db() as connection:
         return [dict(r) for r in connection.execute(sql, params).fetchall()]
@@ -1915,7 +1915,7 @@ def _lead_verification_rows(filters):
         v.business_condition, v.actual_business_activity, v.existing_assets, v.needs,
         v.working_capital_details, v.verified_turnover, v.verified_profit, v.verified_worker_count,
         v.data_match, v.discrepancy_notes, v.verification_notes, v.rejection_reason,
-        v.latitude AS verification_latitude, v.longitude AS verification_longitude,
+        v.latitude AS verification_latitude, v.longitude AS verification_longitude, v.accuracy AS verification_accuracy,
         v.total_needs_amount
         FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id
         JOIN survey_verifications v ON v.survey_id=s.id""" + where_sql + " ORDER BY v.verified_at DESC NULLS LAST, s.id DESC"
@@ -1985,7 +1985,7 @@ def _lead_page(title, username, content):
 @media(max-width:420px){{.lead-photo-grid{{grid-template-columns:1fr}}.lead-photo-image{{height:auto;max-height:280px;object-fit:contain}}}}
 
  .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#fff;border:1px solid var(--line);border-left:4px solid var(--gold);border-radius:13px;padding:14px;box-shadow:0 3px 12px #2b1b0808}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#f2eee7}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:var(--muted);font-size:11px}}.person-info h3{{margin:0 0 3px;color:var(--maroon)}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#e3f4e8;color:#176534}}.status.inactive{{background:#fff0df;color:#8a4b08}}footer{{text-align:center;color:var(--muted);font-size:12px;padding:20px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/personel'>Data Personel</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>Ikatan Persaudaraan Triple 555</h1><p>Portal khusus pimpinan · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><nav class='nav'><a class='btn light' href='/pimpinan'>Ringkasan</a><a class='btn light' href='/pimpinan/survei'>Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>Data Personel</a></nav>{content}</main><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
@@ -2139,6 +2139,47 @@ def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_
     return HTMLResponse(_lead_page("Data Personel DPS dan DPSS", username, content))
 
 
+
+def _lead_map_embed(surveys, verifications, map_id="lead-dashboard-map"):
+    markers = []
+    for row in surveys:
+        try:
+            lat, lon = float(row.get("latitude")), float(row.get("longitude"))
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+        except (TypeError, ValueError):
+            continue
+        markers.append({"kind":"survey","lat":lat,"lon":lon,"survey_id":row.get("survey_id"),
+            "applicant":row.get("applicant_name") or "-","business":row.get("business_name") or "-",
+            "village":row.get("village") or "-","officer":row.get("officer_name") or row.get("member_id") or "-",
+            "date":row.get("surveyed_at") or "-","accuracy":row.get("accuracy")})
+    for row in verifications:
+        try:
+            lat, lon = float(row.get("verification_latitude")), float(row.get("verification_longitude"))
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+        except (TypeError, ValueError):
+            continue
+        markers.append({"kind":"verification","lat":lat,"lon":lon,"survey_id":row.get("survey_id"),
+            "applicant":row.get("applicant_name") or "-","business":row.get("business_name") or "-",
+            "village":row.get("village") or "-","officer":row.get("verifier_name") or row.get("verifier_id") or "-",
+            "date":row.get("verified_at") or "-","accuracy":row.get("verification_accuracy"),
+            "decision":row.get("decision") or "-"})
+    data = json.dumps(markers, ensure_ascii=False, default=str).replace("</", "<\\/")
+    survey_count = sum(1 for m in markers if m["kind"] == "survey")
+    verify_count = len(markers) - survey_count
+    return f"""<section class='panel'>
+      <h2 style='margin-top:0;color:#5b1018'>🗺️ Peta Sebaran GPS Survei dan Verifikasi</h2>
+      <p class='muted'>Peta lokasi tersimpan. Merah = survei DPSS, emas = verifikasi DPS. Pilih titik untuk melihat detail dan akurasi GPS.</p>
+      <div style='display:flex;gap:18px;flex-wrap:wrap;margin:10px 0;font-weight:700'><span>🔴 Survei DPSS: {survey_count}</span><span>🟡 Verifikasi DPS: {verify_count}</span><span>📍 Total: {len(markers)}</span><a class='btn light' href='/pimpinan/peta'>Buka Peta & Filter Lengkap</a></div>
+      <div id='{map_id}' style='height:440px;min-height:320px;border:1px solid #ddd;border-radius:12px;z-index:1'></div>
+      <p id='{map_id}-status' class='muted' aria-live='polite' style='margin-bottom:0'>Memuat peta…</p>
+    </section>
+    <link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' crossorigin=''/>
+    <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' crossorigin=''></script>
+    <script type='application/json' id='{map_id}-data'>{data}</script>
+    <script>(function(){{const el=document.getElementById('{map_id}'),st=document.getElementById('{map_id}-status');const data=JSON.parse(document.getElementById('{map_id}-data').textContent||'[]');if(!window.L){{st.textContent='Peta gagal dimuat. Periksa koneksi internet browser.';return;}}const map=L.map(el).setView([0.5,101.4],8);L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);const bounds=[];const safe=v=>String(v===null||v===undefined||v===''?'-':v).replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));data.forEach(x=>{{const survey=x.kind==='survey';const m=L.circleMarker([x.lat,x.lon],{{radius:8,color:survey?'#8f1825':'#9a6b12',weight:2,fillColor:survey?'#d94a55':'#e5b94f',fillOpacity:.9}}).addTo(map);const acc=x.accuracy===null||x.accuracy===undefined?'-':safe(x.accuracy)+' m';m.bindPopup(`<b>${{survey?'SURVEI DPSS':'VERIFIKASI DPS'}}</b><br>ID: ${{safe(x.survey_id)}}<br>Pemohon: ${{safe(x.applicant)}}<br>Usaha: ${{safe(x.business)}}<br>Desa: ${{safe(x.village)}}<br>Petugas: ${{safe(x.officer)}}<br>Waktu: ${{safe(x.date)}}<br>Koordinat: ${{x.lat.toFixed(6)}}, ${{x.lon.toFixed(6)}}<br>Akurasi: ${{acc}}${{x.decision?'<br>Keputusan: '+safe(x.decision):''}}`);bounds.push([x.lat,x.lon]);}});if(bounds.length){{map.fitBounds(bounds,{{padding:[28,28],maxZoom:15}});st.textContent=data.length+' titik GPS ditampilkan. Klik penanda untuk detail.';}}else{{st.textContent='Belum ada data koordinat GPS yang dapat dipetakan.';}}setTimeout(()=>map.invalidateSize(),180);}})();</script>"""
+
 @app.get("/pimpinan", response_class=HTMLResponse)
 def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
     filters = _lead_filters(request)
@@ -2146,11 +2187,91 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
     verifications = _lead_verification_rows(filters)
     pending = max(0, len(surveys) - len(verifications))
     content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
+{_lead_map_embed(surveys, verifications)}
 <section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
 <section class='cards'><article class='report-card'><h2>👥 Data Personel DPS dan DPSS</h2><p>Daftar nama, foto diri, nomor HP, wilayah penugasan, dan status akun seluruh petugas. Dokumen KTP tidak ditampilkan pada daftar pimpinan.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Personel</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Pengisian profil lengkap, nomor HP, alamat, foto diri, dan dokumen KTP dilakukan melalui dashboard admin khusus.</p><a class='btn' href='/admin/data-personel'>Buka Pendataan Personel</a></article></section>
 <section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
     return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
 
+
+
+@app.get("/pimpinan/peta", response_class=HTMLResponse)
+def pimpinan_peta_gps(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+    filters = _lead_filters(request)
+    surveys = _lead_survey_rows(filters)
+    verifications = _lead_verification_rows(filters)
+    markers = []
+    villages = sorted({str(r.get("village") or "").strip() for r in surveys if str(r.get("village") or "").strip()}, key=str.casefold)
+    for row in surveys:
+        try:
+            lat, lon = float(row.get("latitude")), float(row.get("longitude"))
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+        except (TypeError, ValueError):
+            continue
+        markers.append({
+            "kind": "survey", "lat": lat, "lon": lon,
+            "survey_id": row.get("survey_id"), "applicant": row.get("applicant_name") or "-",
+            "business": row.get("business_name") or "-", "village": row.get("village") or "-",
+            "officer": row.get("officer_name") or row.get("member_id") or "-",
+            "date": row.get("surveyed_at") or "-", "accuracy": row.get("accuracy"),
+        })
+    for row in verifications:
+        try:
+            lat, lon = float(row.get("verification_latitude")), float(row.get("verification_longitude"))
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+        except (TypeError, ValueError):
+            continue
+        markers.append({
+            "kind": "verification", "lat": lat, "lon": lon,
+            "survey_id": row.get("survey_id"), "applicant": row.get("applicant_name") or "-",
+            "business": row.get("business_name") or "-", "village": row.get("village") or "-",
+            "officer": row.get("verifier_name") or row.get("verifier_id") or "-",
+            "date": row.get("verified_at") or "-", "accuracy": row.get("verification_accuracy"),
+            "decision": row.get("decision") or "-",
+        })
+    marker_json = json.dumps(markers, ensure_ascii=False, default=str).replace("</", "<\\/")
+    village_options = "".join(f"<option value='{_lead_e(v)}' {'selected' if filters.get('wilayah') == v else ''}>{_lead_e(v)}</option>" for v in villages)
+    content = f"""<section class='panel'>
+      <h2 style='margin-top:0;color:#5b1018'>Peta Sebaran Lokasi Survei dan Verifikasi</h2>
+      <p class='muted'>Titik merah menunjukkan GPS survei DPSS, sedangkan titik emas menunjukkan GPS verifikasi DPS. Peta menggunakan koordinat yang tersimpan di database, bukan lokasi perangkat yang sedang membuka dashboard.</p>
+      <form method='get' action='/pimpinan/peta' class='filters'>
+        <div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{_lead_e(filters.get('tanggal_mulai'))}'></div>
+        <div><label>TANGGAL SELESAI</label><input type='date' name='tanggal_selesai' value='{_lead_e(filters.get('tanggal_selesai'))}'></div>
+        <div><label>DESA</label><select name='wilayah' style='width:100%;min-height:40px;padding:8px;border:1px solid #d7d2ca;border-radius:8px'><option value=''>Semua desa</option>{village_options}</select></div>
+        <div><label>PETUGAS DPSS</label><input name='petugas' value='{_lead_e(filters.get('petugas'))}' placeholder='ID atau nama petugas'></div>
+        <div class='actions' style='grid-column:1/-1'><button type='submit'>Terapkan Filter</button><a class='btn light' href='/pimpinan/peta'>Reset</a></div>
+      </form>
+      <div class='map-legend' style='display:flex;gap:18px;flex-wrap:wrap;margin:14px 0;font-weight:700'><span>🔴 GPS Survei DPSS: {sum(1 for m in markers if m['kind']=='survey')}</span><span>🟡 GPS Verifikasi DPS: {sum(1 for m in markers if m['kind']=='verification')}</span><span>📍 Total titik: {len(markers)}</span></div>
+      <div id='lead-gps-map' style='height:560px;min-height:360px;border:1px solid #ddd;border-radius:12px;z-index:1'></div>
+      <p id='lead-map-status' class='muted' aria-live='polite' style='margin-bottom:0'>Memuat peta…</p>
+    </section>
+    <script type='application/json' id='lead-map-data'>{marker_json}</script>
+    <link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' crossorigin=''/>
+    <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js' crossorigin=''></script>
+    <script>
+    (function(){{
+      const el=document.getElementById('lead-gps-map'), status=document.getElementById('lead-map-status');
+      const data=JSON.parse(document.getElementById('lead-map-data').textContent||'[]');
+      if(!window.L){{status.textContent='Pustaka peta tidak berhasil dimuat. Periksa koneksi internet browser.';return;}}
+      const map=L.map(el).setView([0.5,101.4],8);
+      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);
+      const bounds=[];
+      data.forEach(item=>{{
+        const isSurvey=item.kind==='survey';
+        const marker=L.circleMarker([item.lat,item.lon],{{radius:8,color:isSurvey?'#8f1825':'#9a6b12',weight:2,fillColor:isSurvey?'#d94a55':'#e5b94f',fillOpacity:.9}}).addTo(map);
+        const safe=v=>String(v===null||v===undefined||v===''?'-':v).replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
+        const acc=item.accuracy===null||item.accuracy===undefined?'-':safe(item.accuracy)+' m';
+        marker.bindPopup(`<b>${{isSurvey?'SURVEI DPSS':'VERIFIKASI DPS'}}</b><br>ID Survei: ${{safe(item.survey_id)}}<br>Pemohon: ${{safe(item.applicant)}}<br>Usaha: ${{safe(item.business)}}<br>Desa: ${{safe(item.village)}}<br>Petugas: ${{safe(item.officer)}}<br>Waktu: ${{safe(item.date)}}<br>Koordinat: ${{item.lat.toFixed(6)}}, ${{item.lon.toFixed(6)}}<br>Akurasi GPS: ${{acc}}${{item.decision?'<br>Keputusan: '+safe(item.decision):''}}`);
+        bounds.push([item.lat,item.lon]);
+      }});
+      if(bounds.length){{map.fitBounds(bounds,{{padding:[30,30],maxZoom:15}});status.textContent=`${{data.length}} titik GPS ditampilkan. Pilih penanda untuk melihat detail.`;}}
+      else{{status.textContent='Belum ada koordinat GPS yang cocok dengan filter ini.';}}
+      setTimeout(()=>map.invalidateSize(),150);
+    }})();
+    </script>"""
+    return HTMLResponse(_lead_page("Peta Lokasi GPS", username, content))
 
 def _lead_filters_form(filters, base, export_prefix):
     qs = _lead_qs(filters)
