@@ -51,7 +51,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.9.0-member-based-app-access",
+    version="3.10.0-admin-main-dashboard",
 )
 
 app.add_middleware(
@@ -1612,7 +1612,7 @@ def account_management_dashboard(credentials: HTTPBasicCredentials = Depends(adm
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,Arial,sans-serif}.wrap{max-width:1180px;margin:auto;padding:22px 15px 45px}.hero{background:linear-gradient(120deg,#31090e,var(--maroon));color:#fff;padding:23px;border-radius:16px}.hero h1{margin:0 0 5px}.hero p{margin:0;color:#f5e8e8}.panel{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;margin:15px 0}.notice{background:#fff8e8;border-left:4px solid var(--gold);padding:12px 14px;border-radius:8px;color:#59451d}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.field{display:flex;flex-direction:column;gap:5px;min-width:220px;flex:1}label{font-weight:650;font-size:13px}input,select{font:inherit;min-height:42px;border:1px solid #d4d0ca;border-radius:8px;padding:8px 10px;width:100%}button,.btn{display:inline-block;border:0;border-radius:8px;padding:10px 14px;background:var(--maroon);color:#fff;text-decoration:none;font:inherit;font-weight:700;cursor:pointer}button.secondary,.btn.secondary{background:#eee8e1;color:#332b2b}button.danger{background:var(--red)}button:disabled{opacity:.55;cursor:wait}.status{display:none;padding:11px 13px;border-radius:8px;margin:12px 0;white-space:pre-wrap}.status.show{display:block}.status.ok{background:#eaf7ef;color:var(--green)}.status.err{background:#fff0ef;color:#8a1c13}.tablewrap{overflow:auto;margin-top:13px}table{border-collapse:collapse;width:100%;min-width:850px}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;text-transform:uppercase;color:#625b55;background:#faf8f5}.pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:12px;font-weight:700;background:#e8f4ec;color:#17603b}.pill.off{background:#fce8e6;color:#9b1c14}.subtle{color:var(--muted);font-size:13px}.actions{display:flex;gap:7px;flex-wrap:wrap}.empty{text-align:center;padding:25px;color:var(--muted)}dialog{border:0;border-radius:14px;padding:0;width:min(520px,calc(100% - 28px));box-shadow:0 18px 70px #0004}dialog::backdrop{background:#17090bcc}.modalhead{background:var(--maroon);color:#fff;padding:17px 20px}.modalbody{padding:18px 20px}.modalbody .field{margin:12px 0}.modalfoot{display:flex;justify-content:flex-end;gap:8px;padding:0 20px 20px}.links{margin:14px 0;display:flex;gap:8px;flex-wrap:wrap}@media(max-width:650px){.wrap{padding:12px}.panel{padding:13px}.hero{padding:18px}.toolbar .field{min-width:100%}}
 </style></head><body><main class="wrap">
 <header class="hero"><h1>Kelola Akses Aplikasi</h1><p>Ikatan Persaudaraan Triple 555 · Admin/Pimpinan: __USERNAME__</p></header>
-<div class="links"><a class="btn secondary" href="/admin">Dashboard Admin</a><a class="btn secondary" href="/pimpinan">Dashboard Pimpinan</a><a class="btn secondary" href="/admin/pendaftaran-anggota">Verifikasi Pendaftaran Anggota</a></div>
+<div class="links"><a class="btn secondary" href="/admin/dashboard">Dashboard Utama Admin</a><a class="btn secondary" href="/admin/pendaftaran-anggota">Verifikasi Pendaftaran Anggota</a></div>
 <section class="panel"><div class="notice"><b>Prinsip pengelolaan:</b> daftar anggota diambil dari pendaftaran yang sudah disetujui. Halaman ini tidak menginput ulang identitas anggota. Admin/pimpinan hanya memilih anggota yang ditugaskan, lalu memberikan atau mencabut akses aplikasi.</div>
 <div id="status" class="status" role="status" aria-live="polite"></div>
 <div class="toolbar" style="margin-top:16px"><div class="field"><label for="filter">Cari anggota</label><input id="filter" placeholder="Nama, NIK, jabatan, wilayah, atau ID login"></div><div class="field" style="max-width:220px"><label for="scope">Filter akses</label><select id="scope"><option value="all">Semua anggota disetujui</option><option value="none">Belum diberi akses</option><option value="active">Akses aktif</option><option value="inactive">Akses nonaktif</option></select></div><button id="refreshBtn" class="secondary" type="button">Muat Ulang</button></div>
@@ -1633,6 +1633,90 @@ $('membersBody').addEventListener('click',async e=>{const g=e.target.closest('[d
 $('cancelGrant').addEventListener('click',()=>$('grantDialog').close());$('grantForm').addEventListener('submit',async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const id=$('registrationId').value;const r=await api('/admin/kelola-akun/'+id+'/akses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:$('loginId').value.trim().toUpperCase(),password:$('initialPassword').value})});$('grantDialog').close();msg(r.message+' ID Login: '+r.member_id,true);await load()}catch(err){msg(err.message)}finally{b.disabled=false}});
 load();})();
 </script></body></html>""".replace("__USERNAME__", escape(username)))
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+def admin_main_dashboard(username: str = Depends(verify_admin)):
+    """Halaman utama khusus admin untuk mengakses seluruh fungsi administrasi."""
+    with get_db() as connection:
+        stats = connection.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM organization_member_registrations) AS registrations_total,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='pending') AS registrations_pending,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='revision') AS registrations_revision,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='approved') AS registrations_approved,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='rejected') AS registrations_rejected,
+                (SELECT COUNT(*) FROM officers) AS accounts_total,
+                (SELECT COUNT(*) FROM officers WHERE active=1) AS accounts_active,
+                (SELECT COUNT(*) FROM officers WHERE active<>1 OR active IS NULL) AS accounts_inactive,
+                (SELECT COUNT(*) FROM surveys) AS surveys_total,
+                (SELECT COUNT(*) FROM survey_verifications) AS verifications_total
+        """).fetchone()
+        recent = connection.execute("""
+            SELECT full_name, registration_code, org_level, org_position, region, status, created_at
+            FROM organization_member_registrations
+            WHERE status IN ('pending','revision')
+            ORDER BY created_at DESC
+            LIMIT 6
+        """).fetchall()
+
+    def stat(key):
+        return int((stats or {}).get(key) or 0)
+
+    recent_rows = []
+    for row in recent:
+        status = str(row.get('status') or '')
+        status_label = 'Perlu perbaikan' if status == 'revision' else 'Menunggu verifikasi'
+        status_class = 'revision' if status == 'revision' else 'pending'
+        recent_rows.append(
+            "<tr>"
+            f"<td><b>{escape(str(row.get('full_name') or '-'))}</b><br><small>{escape(str(row.get('registration_code') or '-'))}</small></td>"
+            f"<td>{escape(str(row.get('org_level') or '-'))} · {escape(str(row.get('org_position') or '-'))}</td>"
+            f"<td>{escape(str(row.get('region') or '-'))}</td>"
+            f"<td><span class='badge {status_class}'>{status_label}</span></td>"
+            "</tr>"
+        )
+    recent_html = ''.join(recent_rows) or "<tr><td colspan='4' class='empty'>Tidak ada pendaftaran yang menunggu tindakan.</td></tr>"
+
+    return HTMLResponse(f"""<!doctype html>
+<html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Dashboard Utama Admin | Triple 555</title>
+<style>
+:root{{--maroon:#5b1018;--deep:#31090e;--gold:#d8b15a;--paper:#f5f1eb;--ink:#292323;--muted:#756d68;--line:#e8e0d7;--green:#17603b;--red:#9b2226}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,Arial,sans-serif}}
+.wrap{{max-width:1240px;margin:auto;padding:22px 16px 48px}}
+.hero{{background:linear-gradient(120deg,var(--deep),var(--maroon));color:white;padding:25px;border-radius:17px;border-bottom:5px solid var(--gold);display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}}
+.brand{{display:flex;align-items:center;gap:15px}}.brand img{{width:68px;height:68px;object-fit:contain;border-radius:50%;background:#fff;padding:4px}}h1{{margin:0 0 4px;font-size:clamp(23px,4vw,32px)}}.hero p{{margin:0;color:#f0e5e1}}.user{{background:#ffffff18;border:1px solid #ffffff35;padding:9px 13px;border-radius:10px;font-size:13px}}
+.section-title{{margin:25px 0 12px;font-size:19px;color:var(--maroon)}}.stats{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}}.stat,.card,.panel{{background:white;border:1px solid var(--line);border-radius:14px;box-shadow:0 3px 12px #32100b08}}
+.stat{{padding:16px}}.stat span{{display:block;color:var(--muted);font-size:12px;font-weight:650}}.stat strong{{display:block;font-size:30px;color:var(--maroon);margin-top:5px;line-height:1.2}}.stat small{{color:var(--muted)}}
+.menu{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.card{{padding:19px;display:flex;gap:14px;align-items:flex-start}}.icon{{width:45px;height:45px;flex:0 0 45px;border-radius:12px;background:#f6eddf;display:grid;place-items:center;font-size:23px}}.card h3{{margin:0 0 5px;color:var(--maroon);font-size:17px}}.card p{{margin:0 0 13px;color:var(--muted);font-size:13px}}.btn{{display:inline-block;background:var(--maroon);color:#fff;text-decoration:none;padding:9px 13px;border-radius:8px;font-weight:700;font-size:13px}}.btn:hover{{background:var(--deep)}}
+.panel{{padding:17px;margin-top:15px;overflow:hidden}}.panel h2{{font-size:18px;color:var(--maroon);margin:0 0 12px}}.tablewrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:650px}}th,td{{text-align:left;padding:11px 9px;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:12px;text-transform:uppercase;color:#6b625b;background:#faf8f5}}small{{color:var(--muted)}}.badge{{display:inline-block;border-radius:20px;padding:4px 9px;font-size:11px;font-weight:750}}.pending{{background:#fff2d6;color:#81570c}}.revision{{background:#fce8e6;color:#9b2226}}.empty{{text-align:center;color:var(--muted);padding:22px}}.foot{{margin-top:22px;text-align:center;color:var(--muted);font-size:12px}}
+@media(max-width:950px){{.stats{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:620px){{.wrap{{padding:12px}}.hero{{padding:18px}}.brand img{{width:54px;height:54px}}.stats{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.stat{{padding:12px}}.stat strong{{font-size:25px}}.menu{{grid-template-columns:1fr}}.card{{padding:15px}}}}
+</style></head><body><main class='wrap'>
+<header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>Dashboard Utama Admin</h1><p>Pusat pengelolaan administrasi sistem organisasi Triple 555</p></div></div><div class='user'>Login sebagai Admin: <b>{escape(username)}</b></div></header>
+<h2 class='section-title'>Ringkasan Sistem</h2>
+<section class='stats'>
+<div class='stat'><span>Total Pendaftaran Anggota</span><strong>{stat('registrations_total')}</strong><small>Seluruh status</small></div>
+<div class='stat'><span>Menunggu Verifikasi</span><strong>{stat('registrations_pending')}</strong><small>Perlu diperiksa admin</small></div>
+<div class='stat'><span>Perlu Perbaikan</span><strong>{stat('registrations_revision')}</strong><small>Menunggu pembaruan data</small></div>
+<div class='stat'><span>Anggota Disetujui</span><strong>{stat('registrations_approved')}</strong><small>Masuk daftar anggota terverifikasi</small></div>
+<div class='stat'><span>Pendaftaran Ditolak</span><strong>{stat('registrations_rejected')}</strong><small>Sudah diputuskan</small></div>
+<div class='stat'><span>Total Akun Aplikasi</span><strong>{stat('accounts_total')}</strong><small>Petugas yang pernah diberi akses</small></div>
+<div class='stat'><span>Akun Aktif</span><strong>{stat('accounts_active')}</strong><small>Dapat menggunakan aplikasi</small></div>
+<div class='stat'><span>Akun Nonaktif</span><strong>{stat('accounts_inactive')}</strong><small>Akses sedang dicabut</small></div>
+<div class='stat'><span>Total Survei</span><strong>{stat('surveys_total')}</strong><small>Data survei tersimpan</small></div>
+<div class='stat'><span>Hasil Verifikasi DPS</span><strong>{stat('verifications_total')}</strong><small>Verifikasi tersimpan</small></div>
+</section>
+<h2 class='section-title'>Menu Administrasi</h2>
+<section class='menu'>
+<article class='card'><div class='icon'>📝</div><div><h3>Verifikasi Pendaftaran Anggota</h3><p>Periksa pendaftaran, edit data yang keliru, setujui, minta perbaikan, atau tolak pendaftaran.</p><a class='btn' href='/admin/pendaftaran-anggota'>Buka Verifikasi</a></div></article>
+<article class='card'><div class='icon'>👥</div><div><h3>Data Personel Petugas</h3><p>Lihat dan kelola data profil petugas yang sudah memiliki akun aplikasi.</p><a class='btn' href='/admin/data-personel'>Buka Data Personel</a></div></article>
+<article class='card'><div class='icon'>🔐</div><div><h3>Kelola Akses Aplikasi</h3><p>Pilih anggota terverifikasi yang ditugaskan, berikan akses, aktifkan kembali, atau cabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses</a></div></article>
+<article class='card'><div class='icon'>📍</div><div><h3>Data Survei dan Media</h3><p>Pantau data survei, lokasi GPS, dokumen, foto, video, dan hasil verifikasi yang tersimpan.</p><a class='btn' href='/admin'>Buka Data Survei</a></div></article>
+</section>
+<section class='panel'><h2>Pendaftaran yang Memerlukan Tindakan</h2><div class='tablewrap'><table><thead><tr><th>Nama / Kode</th><th>Struktur / Jabatan</th><th>Wilayah</th><th>Status</th></tr></thead><tbody>{recent_html}</tbody></table></div><p style='margin:14px 0 0'><a class='btn' href='/admin/pendaftaran-anggota?status=pending'>Periksa Pendaftaran</a></p></section>
+<div class='foot'>Dashboard Administrasi Triple 555 · Data ditampilkan langsung dari server</div>
+</main></body></html>""")
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1842,7 +1926,7 @@ def admin_dashboard(
     <body>
         <h1>Dashboard Survei GPS</h1>
         <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 60 detik. Pratinjau media menggunakan tautan sementara untuk bucket privat.</div>
-        <div class="info"><a href="/admin/pendaftaran-anggota">Verifikasi Pendaftaran Anggota</a> &nbsp; | &nbsp; <a href="/admin/kelola-akun">Kelola Akses Aplikasi</a> &nbsp; | &nbsp; <a href="/pimpinan">Dashboard Pimpinan</a></div>
+        <div class="info"><a href="/admin/dashboard">Dashboard Utama Admin</a> &nbsp; | &nbsp; <a href="/admin/pendaftaran-anggota">Verifikasi Pendaftaran Anggota</a> &nbsp; | &nbsp; <a href="/admin/kelola-akun">Kelola Akses Aplikasi</a></div>
         <div class="card"><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows) + len(verification_media_rows)} &nbsp; | &nbsp; <strong>Total hasil verifikasi:</strong> {len(verification_rows)}</div>
         <div class="table-wrap">
             <table>
@@ -2203,7 +2287,7 @@ def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
     if not body:
         body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
-    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin'>Dashboard Admin</a> <a class='btn' href='/pimpinan'>Dashboard Pimpinan</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p><section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
+    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p><section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -2481,7 +2565,7 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
     body{{font:14px system-ui;background:#f4f0eb;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:16px 20px;border-bottom:4px solid #d8b15a}}header .brand{{max-width:1100px;margin:auto;display:flex;align-items:center;gap:14px}}header .brand img{{width:62px;height:62px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0 0 4px}}main{{max-width:1100px;margin:auto;padding:18px}}.card{{background:white;padding:17px;border-radius:12px;margin:12px 0;border:1px solid #e5ddd4}}.head{{display:flex;gap:14px;align-items:center}}label{{display:block;font-weight:bold;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d5cec7;border-radius:8px;box-sizing:border-box;font:inherit}}button{{background:#5b1018;color:white;border:0;padding:11px 15px;border-radius:8px;margin-top:12px}}.filters{{display:flex;gap:8px;flex-wrap:wrap}}.filters>*{{padding:9px;border-radius:8px}}a{{color:#5b1018}}small{{color:#777}}
     </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Verifikasi Pendaftaran Anggota 555</h1><div>Admin organisasi · dokumen identitas hanya ditampilkan di halaman ini</div></div></div></header><main>
     <form class='filters' method='get'><select name='status'><option value='pending' {'selected' if status=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if status=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if status=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if status=='rejected' else ''}>Ditolak</option><option value='all' {'selected' if status=='all' else ''}>Semua</option></select><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, HP, kode'><button type='submit'>Tampilkan</button></form>
-    <p><a href='/admin/data-personel'>Kembali ke data personel</a></p>{''.join(cards) if cards else '<p>Belum ada pendaftaran pada kategori ini.</p>'}</main></body></html>"""
+    <p><a href='/admin/dashboard'>Dashboard Utama Admin</a> &nbsp; | &nbsp; <a href='/admin/data-personel'>Data Personel</a></p>{''.join(cards) if cards else '<p>Belum ada pendaftaran pada kategori ini.</p>'}</main></body></html>"""
     return HTMLResponse(content)
 
 
