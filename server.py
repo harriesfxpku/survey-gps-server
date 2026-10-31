@@ -2377,6 +2377,8 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
         cards.append(f"""<article class='card'><div class='head'>{photo_html}<div><b>{_lead_e(r['full_name'])}</b><div>{_lead_e(r['registration_code'])} · {_lead_e(r['status'].upper())}</div><div>{_lead_e(r['org_level'])} · {_lead_e(r['org_position'])}</div></div></div>
         <p><b>NIK:</b> {_lead_e(r['nik'])} · <b>HP:</b> {_lead_e(r['phone'])}</p><p><b>Wilayah:</b> {_lead_e(r['region'])} · {_lead_e(('Seluruh Desa' if r['org_level']=='DPS' and not r['village_id'] else (r['village_name'] or '-')))}</p>
         <p><b>Alamat:</b> {_lead_e(r['address'])}</p><p><b>Dokumen:</b> {ktp_html}</p>
+        <p style='display:flex;gap:8px;flex-wrap:wrap'><a href='/admin/pendaftaran-anggota/{int(r['id'])}/edit' style='display:inline-block;background:#8a5b16;color:white;padding:9px 12px;border-radius:7px;text-decoration:none'>Edit Data</a></p>
+        <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}/hapus' onsubmit="return confirm('Hapus permanen pendaftaran ini? Akun personel dan riwayat survei tidak akan dihapus.')"><button type='submit' style='background:#9b2226'>Hapus Pendaftaran</button></form>
         <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}'><label>Status pemeriksaan</label><select name='new_status'><option value='pending' {'selected' if r['status']=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if r['status']=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if r['status']=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if r['status']=='rejected' else ''}>Ditolak</option></select>
         <label>Catatan admin</label><textarea name='admin_note' rows='2'>{_lead_e(r['admin_note'])}</textarea><label>ID anggota resmi (opsional, untuk menghubungkan akun yang sudah ada)</label><input name='linked_member_id' value='{_lead_e(r['linked_member_id'])}' maxlength='50'><button type='submit'>Simpan Pemeriksaan</button></form></article>""")
     content=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Pendaftaran Anggota</title><style>
@@ -2385,6 +2387,108 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
     <form class='filters' method='get'><select name='status'><option value='pending' {'selected' if status=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if status=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if status=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if status=='rejected' else ''}>Ditolak</option><option value='all' {'selected' if status=='all' else ''}>Semua</option></select><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, HP, kode'><button type='submit'>Tampilkan</button></form>
     <p><a href='/admin/data-personel'>Kembali ke data personel</a></p>{''.join(cards) if cards else '<p>Belum ada pendaftaran pada kategori ini.</p>'}</main></body></html>"""
     return HTMLResponse(content)
+
+
+@app.get("/admin/pendaftaran-anggota/{registration_id}/edit", response_class=HTMLResponse)
+def admin_edit_member_registration_page(registration_id: int, username: str = Depends(verify_admin)):
+    with get_db() as connection:
+        row = connection.execute("SELECT * FROM organization_member_registrations WHERE id=%s", (registration_id,)).fetchone()
+        villages = connection.execute("SELECT id,village_name FROM villages WHERE active=1 ORDER BY village_name").fetchall()
+    if not row:
+        raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan.")
+    village_options = "<option value=''>Seluruh Desa (cakupan DPS)</option>" + "".join(
+        f"<option value='{int(v['id'])}' {'selected' if row['village_id']==v['id'] else ''}>{_lead_e(v['village_name'])}</option>" for v in villages
+    )
+    photo = create_supabase_signed_url(row['profile_photo_path'], 1800, _officer_private_bucket()) if row['profile_photo_path'] else None
+    ktp = create_supabase_signed_url(row['ktp_path'], 1800, _officer_private_bucket()) if row['ktp_path'] else None
+    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Edit Pendaftaran Anggota</title>
+    <style>body{{font:15px system-ui;background:#f4f0eb;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:20px;border-bottom:4px solid #d8b15a}}main{{max-width:850px;margin:22px auto;padding:0 14px}}form,.box{{background:white;padding:20px;border-radius:12px;margin:12px 0}}label{{display:block;font-weight:700;margin:12px 0 5px}}input,select,textarea{{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d5cec7;border-radius:8px;font:inherit}}button,a.btn{{display:inline-block;background:#5b1018;color:white;border:0;border-radius:8px;padding:11px 15px;text-decoration:none;margin-top:14px;cursor:pointer}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}img{{max-width:150px;max-height:150px;object-fit:contain}}small{{color:#666}}@media(max-width:600px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><h1>Edit Data Pendaftaran Anggota</h1><div>{_lead_e(row['registration_code'])} · Status: {_lead_e(row['status'])}</div></header><main>
+    <form method='post' enctype='multipart/form-data' action='/admin/pendaftaran-anggota/{registration_id}/edit'>
+    <div class='grid'><div><label>Nama lengkap *</label><input name='full_name' required maxlength='150' value='{_lead_e(row['full_name'])}'></div><div><label>NIK *</label><input name='nik' required minlength='16' maxlength='16' pattern='[0-9]{{16}}' value='{_lead_e(row['nik'])}'></div>
+    <div><label>Jenis kelamin *</label><select name='gender' required><option value='Laki-laki' {'selected' if row['gender']=='Laki-laki' else ''}>Laki-laki</option><option value='Perempuan' {'selected' if row['gender']=='Perempuan' else ''}>Perempuan</option></select></div><div><label>Tempat lahir</label><input name='birth_place' maxlength='100' value='{_lead_e(row['birth_place'])}'></div>
+    <div><label>Tanggal lahir</label><input type='date' name='birth_date' value='{_lead_e(row['birth_date'].isoformat() if row['birth_date'] else '')}'></div><div><label>Nomor HP *</label><input name='phone' required maxlength='30' value='{_lead_e(row['phone'])}'></div>
+    <div><label>Email</label><input type='email' name='email' maxlength='150' value='{_lead_e(row['email'])}'></div><div><label>Tingkat organisasi *</label><select name='org_level' id='org_level'><option value='DPS' {'selected' if row['org_level']=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if row['org_level']=='DPSS' else ''}>DPSS</option></select></div>
+    <div><label>Jabatan *</label><input name='org_position' required maxlength='150' value='{_lead_e(row['org_position'])}'></div><div><label>Wilayah / Kecamatan *</label><input name='region' required maxlength='150' value='{_lead_e(row['region'])}'></div>
+    <div><label>Desa / Cakupan DPS</label><select name='village_id' id='village_id'>{village_options}</select><small>Untuk DPS, kosongkan jika mencakup seluruh desa. Untuk DPSS, wajib pilih desa.</small></div></div>
+    <label>Alamat lengkap *</label><textarea name='address' required rows='3' maxlength='1500'>{_lead_e(row['address'])}</textarea>
+    <div class='grid'><div><label>Foto profil saat ini</label>{f"<img src='{_lead_e(photo)}'>" if photo else 'Belum ada'}<label>Ganti foto profil (opsional)</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp'></div>
+    <div><label>Foto KTP saat ini</label>{f"<img src='{_lead_e(ktp)}'>" if ktp else 'Belum ada'}<label>Ganti foto KTP (opsional)</label><input type='file' name='ktp_photo' accept='image/jpeg,image/png,image/webp'></div></div>
+    <button type='submit'>Simpan Perubahan</button> <a class='btn' href='/admin/pendaftaran-anggota'>Batal</a></form></main>
+    <script>const level=document.getElementById('org_level'), village=document.getElementById('village_id');function syncVillage(){{village.required=level.value==='DPSS';if(level.value==='DPSS'&&!village.value){{}}}}level.addEventListener('change',syncVillage);syncVillage();</script></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.post("/admin/pendaftaran-anggota/{registration_id}/edit")
+def admin_edit_member_registration(
+    registration_id: int, full_name: str = Form(...), nik: str = Form(...), gender: str = Form(...),
+    birth_place: str = Form(""), birth_date: str = Form(""), address: str = Form(...), phone: str = Form(...),
+    email: str = Form(""), org_level: str = Form(...), org_position: str = Form(...), region: str = Form(...),
+    village_id: str = Form(""), profile_photo: UploadFile | None = File(None), ktp_photo: UploadFile | None = File(None),
+    username: str = Depends(verify_admin),
+):
+    full_name, nik, gender = full_name.strip(), re.sub(r"\D", "", nik), gender.strip()
+    address, phone, email = address.strip(), phone.strip(), email.strip()
+    org_level, org_position, region = org_level.strip().upper(), org_position.strip(), region.strip()
+    if len(full_name) < 3 or len(nik) != 16 or gender not in {"Laki-laki", "Perempuan"} or not address or len(phone) < 8 or org_level not in {"DPS", "DPSS"} or len(org_position) < 2 or not region:
+        raise HTTPException(status_code=422, detail="Periksa kembali seluruh data wajib.")
+    if birth_date.strip():
+        try: datetime.strptime(birth_date.strip(), "%Y-%m-%d")
+        except ValueError as exc: raise HTTPException(status_code=422, detail="Tanggal lahir tidak valid.") from exc
+    village_value = (village_id or "").strip()
+    try:
+        village_id_value = None if village_value in {"", "all"} else int(village_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Pilihan desa tidak valid.") from exc
+    if org_level == "DPSS" and village_id_value is None:
+        raise HTTPException(status_code=422, detail="DPSS wajib memilih desa.")
+    with get_db() as connection:
+        row = connection.execute("SELECT * FROM organization_member_registrations WHERE id=%s", (registration_id,)).fetchone()
+        if not row: raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan.")
+        duplicate = connection.execute("SELECT id FROM organization_member_registrations WHERE nik=%s AND id<>%s", (nik, registration_id)).fetchone()
+        if duplicate: raise HTTPException(status_code=409, detail="NIK sudah digunakan pada pendaftaran lain.")
+        if village_id_value is not None:
+            valid_village = connection.execute("SELECT id FROM villages WHERE id=%s AND active=1", (village_id_value,)).fetchone()
+            if not valid_village: raise HTTPException(status_code=422, detail="Desa tidak tersedia.")
+    new_photo = _upload_officer_private(profile_photo, row['registration_code'], "profile") if profile_photo and profile_photo.filename else row['profile_photo_path']
+    new_ktp = _upload_officer_private(ktp_photo, row['registration_code'], "ktp") if ktp_photo and ktp_photo.filename else row['ktp_path']
+    with get_db() as connection:
+        connection.execute("""UPDATE organization_member_registrations SET full_name=%s,nik=%s,gender=%s,birth_place=%s,birth_date=%s,address=%s,phone=%s,email=%s,org_level=%s,org_position=%s,region=%s,village_id=%s,profile_photo_path=%s,ktp_path=%s,updated_at=NOW() WHERE id=%s""",
+            (full_name,nik,gender,birth_place.strip(),birth_date.strip() or None,address,phone,email,org_level,org_position,region,village_id_value,new_photo,new_ktp,registration_id))
+        if row['linked_member_id'] and row['status']=='approved':
+            officer = connection.execute("SELECT id FROM officers WHERE member_id=%s", (row['linked_member_id'],)).fetchone()
+            if officer:
+                connection.execute("UPDATE officers SET member_name=%s,role=%s,region=%s,updated_at=NOW() WHERE id=%s", (full_name,org_level,region,officer['id']))
+                connection.execute("UPDATE members SET member_name=%s WHERE member_id=%s", (full_name,row['linked_member_id']))
+                connection.execute("""UPDATE officer_profiles SET nik=%s,phone=%s,address=%s,birth_place=%s,birth_date=%s,profile_photo_path=%s,ktp_path=%s,updated_at=NOW() WHERE officer_id=%s""", (nik,phone,address,birth_place.strip(),birth_date.strip() or None,new_photo,new_ktp,officer['id']))
+    return RedirectResponse(url="/admin/pendaftaran-anggota?status=all", status_code=303)
+
+
+@app.post("/admin/pendaftaran-anggota/{registration_id}/hapus")
+def admin_delete_member_registration(registration_id: int, username: str = Depends(verify_admin)):
+    with get_db() as connection:
+        row = connection.execute("SELECT id,profile_photo_path,ktp_path,linked_member_id,status FROM organization_member_registrations WHERE id=%s", (registration_id,)).fetchone()
+    if not row: raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan.")
+    # Jika sudah disetujui dan ditautkan, file yang sama mungkin sedang dipakai profil personel.
+    # Karena itu hapus hanya catatan pendaftarannya, jangan hapus objek dokumen personel.
+    keep_personnel_files = bool(row['linked_member_id'] and row['status'] == 'approved')
+    paths = [] if keep_personnel_files else [path for path in (row['profile_photo_path'], row['ktp_path']) if path]
+    if paths:
+        supabase_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=503, detail="Konfigurasi Supabase belum lengkap. Data tidak dihapus.")
+        bucket = _officer_private_bucket()
+        request = urllib.request.Request(f"{supabase_url}/storage/v1/object/{quote(bucket, safe='')}", data=json.dumps({"prefixes": paths}).encode("utf-8"), headers={"Authorization": f"Bearer {supabase_key}", "apikey": supabase_key, "Content-Type": "application/json"}, method="DELETE")
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                if response.status not in (200, 204): raise HTTPException(status_code=502, detail="Supabase tidak mengonfirmasi penghapusan dokumen. Data belum dihapus.")
+        except urllib.error.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Gagal menghapus dokumen privat. Data belum dihapus.") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise HTTPException(status_code=502, detail="Penyimpanan dokumen tidak dapat dijangkau. Data belum dihapus.") from exc
+    with get_db() as connection:
+        connection.execute("DELETE FROM organization_member_registrations WHERE id=%s", (registration_id,))
+    return RedirectResponse(url="/admin/pendaftaran-anggota?status=all", status_code=303)
 
 
 @app.post("/admin/pendaftaran-anggota/{registration_id}")
