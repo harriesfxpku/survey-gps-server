@@ -2406,11 +2406,12 @@ def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
         photo = create_supabase_signed_url(r["profile_photo_path"], bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
         photo_html = f"<img class='avatar' src='{_lead_e(photo)}'>" if photo else "<div class='avatar blank'>Foto<br>belum ada</div>"
         territory = r["villages"] or r["region"] or "-"
-        body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(territory)}</td><td>{status}</td><td><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Data</a></td></tr>""")
+        body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(territory)}</td><td>{status}</td><td><div style='display:flex;gap:7px;flex-wrap:wrap'><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Data</a><form method='post' action='/admin/data-personel/{r['officer_id']}/hapus' onsubmit="return confirm('Hapus data personel {_lead_e(r['member_name'])} dengan ID {_lead_e(r['member_id'])}? Akun dan pendaftaran terkait akan dihapus. Data survei/verifikasi tidak akan dihapus.');"><button class='btn danger' type='submit'>Hapus</button></form></div></td></tr>""")
     if not body:
         body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
+    deleted_notice = "<div style='background:#eaf7ef;color:#14532d;padding:11px 14px;border-radius:9px;margin:12px 0'>Data personel dan pendaftaran terkait berhasil dihapus.</div>" if request.query_params.get("deleted") == "1" else ""
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
-    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p><section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
+    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.danger{{background:#a32020}}form{{margin:0}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p>{deleted_notice}<section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -2522,6 +2523,53 @@ def admin_save_data_personel(
         """, (officer_id, nik.strip(), phone.strip(), address.strip(), birth_place.strip(),
               birth_date.strip() or None, photo_path, ktp_path))
     return RedirectResponse(url=f"/admin/data-personel/{officer_id}?saved=1", status_code=303)
+
+
+@app.post("/admin/data-personel/{officer_id}/hapus")
+def admin_delete_data_personel(officer_id: int, username: str = Depends(verify_admin)):
+    """Hapus akun/personel dan pendaftaran terkait hanya jika belum memiliki aktivitas survei/verifikasi."""
+    with get_db() as connection:
+        officer = connection.execute(
+            "SELECT id, member_id, member_name FROM officers WHERE id=%s FOR UPDATE",
+            (officer_id,),
+        ).fetchone()
+        if not officer:
+            raise HTTPException(status_code=404, detail="Akun personel tidak ditemukan.")
+
+        member_id = officer["member_id"]
+        survey_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM surveys WHERE member_id=%s", (member_id,)
+        ).fetchone()["n"]
+        media_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM survey_media WHERE member_id=%s", (member_id,)
+        ).fetchone()["n"]
+        verification_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM survey_verifications WHERE verifier_id=%s", (member_id,)
+        ).fetchone()["n"]
+        verification_media_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM verification_media WHERE verifier_id=%s", (member_id,)
+        ).fetchone()["n"]
+        if survey_count or media_count or verification_count or verification_media_count:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Data tidak dapat dihapus karena akun sudah memiliki aktivitas: "
+                    f"{survey_count} survei, {media_count} media survei, "
+                    f"{verification_count} verifikasi, dan {verification_media_count} media verifikasi. "
+                    "Nonaktifkan akun jika akses perlu dihentikan."
+                ),
+            )
+
+        # Hanya pendaftaran yang tertaut ke ID akun ini yang ikut dibersihkan.
+        connection.execute(
+            "DELETE FROM organization_member_registrations WHERE linked_member_id=%s OR member_code=%s",
+            (member_id, member_id),
+        )
+        # FK ON DELETE CASCADE membersihkan sesi, profil, dan penugasan desa milik officer.
+        connection.execute("DELETE FROM officers WHERE id=%s", (officer_id,))
+        connection.execute("DELETE FROM members WHERE member_id=%s", (member_id,))
+
+    return RedirectResponse(url="/admin/data-personel?deleted=1", status_code=303)
 
 
 # =========================================================
