@@ -4,6 +4,7 @@ import json
 import secrets
 import hashlib
 import re
+import unicodedata
 from fastapi import UploadFile, File, Form
 
 import psycopg
@@ -51,7 +52,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.10.0-admin-main-dashboard",
+    version="3.11.0-member-id-directory",
 )
 
 app.add_middleware(
@@ -87,6 +88,46 @@ def get_db():
         row_factory=dict_row,
         connect_timeout=15,
     )
+
+
+# =========================================================
+# ID ANGGOTA OTOMATIS BERDASARKAN WILAYAH
+# =========================================================
+
+def _member_slug(value: str, limit: int = 18) -> str:
+    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
+    return (value[:limit].strip("-") or "WILAYAH")
+
+
+def _member_code_prefix(org_level: str, region: str, village_name: str = "") -> str:
+    region_slug = _member_slug(region, 18)
+    if str(org_level).upper() == "DPSS":
+        village_slug = _member_slug(village_name, 18)
+        return f"DPSS-{region_slug}-{village_slug}"
+    return f"DPS-{region_slug}"
+
+
+def _allocate_member_code(connection, org_level: str, region: str, village_name: str = "") -> str:
+    """Nomor urut tiga digit per wilayah; advisory lock mencegah nomor ganda saat pendaftaran bersamaan."""
+    prefix = _member_code_prefix(org_level, region, village_name)
+    connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (prefix,))
+    existing = connection.execute(
+        "SELECT member_code FROM organization_member_registrations WHERE member_code LIKE %s",
+        (prefix + "-%",),
+    ).fetchall()
+    used = []
+    for row in existing:
+        tail = str(row.get("member_code") or "").rsplit("-", 1)[-1]
+        if tail.isdigit():
+            used.append(int(tail))
+    number = max(used, default=0) + 1
+    candidate = f"{prefix}-{number:03d}"
+    while connection.execute("""SELECT 1 FROM officers WHERE member_id=%s
+            UNION ALL SELECT 1 FROM members WHERE member_id=%s LIMIT 1""", (candidate, candidate)).fetchone():
+        number += 1
+        candidate = f"{prefix}-{number:03d}"
+    return candidate
 
 
 # =========================================================
@@ -318,6 +359,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS organization_member_registrations (
                 id BIGSERIAL PRIMARY KEY,
                 registration_code VARCHAR(40) UNIQUE NOT NULL,
+                member_code VARCHAR(80) NOT NULL DEFAULT '',
                 full_name VARCHAR(150) NOT NULL,
                 nik VARCHAR(30) NOT NULL,
                 birth_place VARCHAR(100) NOT NULL DEFAULT '',
@@ -351,6 +393,18 @@ def initialize_database():
             ('Balam Jaya', 'Tambang', 'Balam-Jaya-Kec-Tambang')
             ON CONFLICT (village_name)
             DO UPDATE SET district = EXCLUDED.district""")
+        connection.execute("ALTER TABLE organization_member_registrations ADD COLUMN IF NOT EXISTS member_code VARCHAR(80) NOT NULL DEFAULT ''")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_org_reg_member_code_unique ON organization_member_registrations(member_code) WHERE member_code <> ''")
+        # Backfill ID untuk pendaftaran lama. ID login yang sudah dipakai dipertahankan agar akun aktif tidak berubah.
+        old_members = connection.execute("""SELECT r.id,r.member_code,r.linked_member_id,r.org_level,r.region,
+            COALESCE(v.village_name,'') AS village_name
+            FROM organization_member_registrations r LEFT JOIN villages v ON v.id=r.village_id
+            WHERE COALESCE(r.member_code,'')='' ORDER BY r.created_at,r.id""").fetchall()
+        for old in old_members:
+            old_code = (old.get('linked_member_id') or '').strip().upper()
+            if not old_code:
+                old_code = _allocate_member_code(connection, old['org_level'], old['region'], old['village_name'])
+            connection.execute("UPDATE organization_member_registrations SET member_code=%s WHERE id=%s", (old_code, old['id']))
         # Hanya tautkan survei lama jika nama desa cocok persis; media lama tetap di bucket survey-media.
         connection.execute("""UPDATE surveys s SET village_id = v.id FROM villages v
             WHERE s.village_id IS NULL AND LOWER(TRIM(s.village)) = LOWER(v.village_name)""")
@@ -512,7 +566,6 @@ class OfficerCreate(BaseModel):
 
 @app.post("/auth/login")
 def officer_login(payload: OfficerLogin):
-    member_id = payload.member_id.strip().upper()
     with get_db() as connection:
         officer = connection.execute(
             "SELECT * FROM officers WHERE member_id = %s", (member_id,)
@@ -1619,18 +1672,18 @@ def account_management_dashboard(credentials: HTTPBasicCredentials = Depends(adm
 <div class="tablewrap"><table><thead><tr><th>Anggota terverifikasi</th><th>Jabatan / Struktur</th><th>Wilayah</th><th>Akses aplikasi</th><th>Aksi</th></tr></thead><tbody id="membersBody"><tr><td colspan="5" class="empty">Memuat data anggota...</td></tr></tbody></table></div>
 <p class="subtle">Data identitas bersumber dari pendaftaran anggota yang berstatus Disetujui. Pemberian akses tidak mengubah status keanggotaan. Menonaktifkan akses tidak menghapus data anggota maupun riwayat survei.</p></section>
 </main>
-<dialog id="grantDialog"><form id="grantForm"><div class="modalhead"><h2 style="margin:0;font-size:19px">Berikan Akses Aplikasi</h2><div id="selectedName" class="subtle" style="color:#f3e6e6"></div></div><div class="modalbody"><input type="hidden" id="registrationId"><div class="field"><label for="loginId">ID Login Petugas</label><input id="loginId" required minlength="2" maxlength="50" autocomplete="off" placeholder="Contoh: DPSS-AUR01"></div><div class="field"><label for="initialPassword">Kata sandi awal</label><input id="initialPassword" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="Minimal 10 karakter"></div><p class="subtle">Peran DPS/DPSS dan wilayah tugas diambil otomatis dari data pendaftaran anggota yang telah disetujui.</p></div><div class="modalfoot"><button type="button" class="secondary" id="cancelGrant">Batal</button><button type="submit">Setujui & Berikan Akses</button></div></form></dialog>
+<dialog id="grantDialog"><form id="grantForm"><div class="modalhead"><h2 style="margin:0;font-size:19px">Berikan Akses Aplikasi</h2><div id="selectedName" class="subtle" style="color:#f3e6e6"></div></div><div class="modalbody"><input type="hidden" id="registrationId"><div class="field"><label>ID Member otomatis (juga menjadi ID Login)</label><div id="memberCode" style="padding:11px;border:1px solid #d4d0ca;border-radius:8px;background:#f8f4ec;font-weight:800;color:#5b1018">-</div></div><div class="field"><label for="initialPassword">Kata sandi awal yang dibuat admin</label><input id="initialPassword" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="Minimal 10 karakter"></div><p class="subtle">Peran DPS/DPSS dan wilayah tugas diambil otomatis dari data pendaftaran anggota yang telah disetujui.</p></div><div class="modalfoot"><button type="button" class="secondary" id="cancelGrant">Batal</button><button type="submit">Setujui & Berikan Akses</button></div></form></dialog>
 <script>
 (function(){const $=id=>document.getElementById(id);let members=[];
 function msg(text,ok=false){const e=$('status');e.textContent=text;e.className='status show '+(ok?'ok':'err')}
 async function api(path,options={}){let r;try{r=await fetch(path,Object.assign({credentials:'same-origin'},options))}catch(e){throw Error('Koneksi ke server gagal. Periksa internet lalu coba lagi.')}let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw Error(d.detail||d.message||('Permintaan gagal ('+r.status+').'));return d}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function state(m){if(!m.member_id)return '<span class="pill off">Belum diberi akses</span>';return Number(m.account_active)===1?'<span class="pill">Akses aktif</span>':'<span class="pill off">Akses nonaktif</span>'}
-function render(){const q=$('filter').value.trim().toLowerCase(),scope=$('scope').value;let rows=members.filter(m=>[m.full_name,m.nik,m.phone,m.org_position,m.org_level,m.region,m.village_name,m.member_id].join(' ').toLowerCase().includes(q));rows=rows.filter(m=>scope==='all'||(scope==='none'&&!m.member_id)||(scope==='active'&&m.member_id&&Number(m.account_active)===1)||(scope==='inactive'&&m.member_id&&Number(m.account_active)!==1));$('membersBody').innerHTML=rows.length?rows.map(m=>`<tr><td><b>${esc(m.full_name)}</b><br><span class="subtle">NIK: ${esc(m.nik)}</span><br><span class="subtle">HP: ${esc(m.phone)}</span></td><td>${esc(m.org_position)}<br><span class="subtle">${esc(m.org_level)}</span></td><td>${esc(m.region||'-')}${m.village_name?'<br><span class="subtle">Desa: '+esc(m.village_name)+'</span>':''}</td><td>${state(m)}${m.member_id?'<br><span class="subtle">ID login: '+esc(m.member_id)+'</span>':''}</td><td><div class="actions">${!m.member_id?`<button type="button" data-grant="${m.id}">Beri Akses</button>`:(Number(m.account_active)===1?`<button type="button" class="danger" data-disable="${m.id}">Cabut Akses</button>`:`<button type="button" data-enable="${m.id}">Aktifkan Akses</button>`)}</div></td></tr>`).join(''):'<tr><td colspan="5" class="empty">Tidak ada anggota yang cocok. Pastikan pendaftaran sudah berstatus Disetujui.</td></tr>'}
+function state(m){if(!m.login_member_id)return '<span class="pill off">Belum diberi akses</span>';return Number(m.account_active)===1?'<span class="pill">Akses aktif</span>':'<span class="pill off">Akses nonaktif</span>'}
+function render(){const q=$('filter').value.trim().toLowerCase(),scope=$('scope').value;let rows=members.filter(m=>[m.full_name,m.nik,m.phone,m.org_position,m.org_level,m.region,m.village_name,m.member_code,m.login_member_id].join(' ').toLowerCase().includes(q));rows=rows.filter(m=>scope==='all'||(scope==='none'&&!m.login_member_id)||(scope==='active'&&m.login_member_id&&Number(m.account_active)===1)||(scope==='inactive'&&m.login_member_id&&Number(m.account_active)!==1));$('membersBody').innerHTML=rows.length?rows.map(m=>`<tr><td><b>${esc(m.full_name)}</b><br><span class="subtle">NIK: ${esc(m.nik)}</span><br><span class="subtle">HP: ${esc(m.phone)}</span></td><td>${esc(m.org_position)}<br><span class="subtle">${esc(m.org_level)}</span></td><td>${esc(m.region||'-')}${m.village_name?'<br><span class="subtle">Desa: '+esc(m.village_name)+'</span>':''}</td><td>${state(m)}<br><span class="subtle">ID Member: ${esc(m.member_code||'-')}</span>${m.login_member_id?'<br><span class="subtle">Akses dengan ID: '+esc(m.login_member_id)+'</span>':''}</td><td><div class="actions">${!m.login_member_id?`<button type="button" data-grant="${m.id}">Beri Akses</button>`:(Number(m.account_active)===1?`<button type="button" class="danger" data-disable="${m.id}">Cabut Akses</button>`:`<button type="button" data-enable="${m.id}">Aktifkan Akses</button>`)}</div></td></tr>`).join(''):'<tr><td colspan="5" class="empty">Tidak ada anggota yang cocok. Pastikan pendaftaran sudah berstatus Disetujui.</td></tr>'}
 async function load(){ $('membersBody').innerHTML='<tr><td colspan="5" class="empty">Memuat data anggota terverifikasi...</td></tr>';try{const d=await api('/admin/kelola-akun/data');members=Array.isArray(d)?d:[];render();msg('Data dimuat: '+members.length+' anggota terverifikasi.',true)}catch(e){msg(e.message);$('membersBody').innerHTML='<tr><td colspan="5" class="empty">Gagal memuat data.</td></tr>'}}
 $('refreshBtn').addEventListener('click',load);$('filter').addEventListener('input',render);$('scope').addEventListener('change',render);
-$('membersBody').addEventListener('click',async e=>{const g=e.target.closest('[data-grant]'),d=e.target.closest('[data-disable]'),a=e.target.closest('[data-enable]');if(g){const m=members.find(x=>String(x.id)===g.dataset.grant);if(!m)return;$('registrationId').value=m.id;$('selectedName').textContent=m.full_name+' · '+m.org_level+' · '+m.org_position;$('loginId').value='';$('initialPassword').value='';$('grantDialog').showModal();return}if(d){const m=members.find(x=>String(x.id)===d.dataset.disable);if(!m||!confirm('Cabut akses aplikasi untuk '+m.full_name+'? Data anggota dan riwayat survei tetap disimpan.'))return;d.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/nonaktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);d.disabled=false}return}if(a){const m=members.find(x=>String(x.id)===a.dataset.enable);if(!m||!confirm('Aktifkan kembali akses aplikasi untuk '+m.full_name+'?'))return;a.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/aktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);a.disabled=false}}});
-$('cancelGrant').addEventListener('click',()=>$('grantDialog').close());$('grantForm').addEventListener('submit',async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const id=$('registrationId').value;const r=await api('/admin/kelola-akun/'+id+'/akses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({member_id:$('loginId').value.trim().toUpperCase(),password:$('initialPassword').value})});$('grantDialog').close();msg(r.message+' ID Login: '+r.member_id,true);await load()}catch(err){msg(err.message)}finally{b.disabled=false}});
+$('membersBody').addEventListener('click',async e=>{const g=e.target.closest('[data-grant]'),d=e.target.closest('[data-disable]'),a=e.target.closest('[data-enable]');if(g){const m=members.find(x=>String(x.id)===g.dataset.grant);if(!m)return;$('registrationId').value=m.id;$('selectedName').textContent=m.full_name+' · '+m.org_level+' · '+m.org_position;$('memberCode').textContent=m.member_code||'ID belum tersedia';$('initialPassword').value='';$('grantDialog').showModal();return}if(d){const m=members.find(x=>String(x.id)===d.dataset.disable);if(!m||!confirm('Cabut akses aplikasi untuk '+m.full_name+'? Data anggota dan riwayat survei tetap disimpan.'))return;d.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/nonaktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);d.disabled=false}return}if(a){const m=members.find(x=>String(x.id)===a.dataset.enable);if(!m||!confirm('Aktifkan kembali akses aplikasi untuk '+m.full_name+'?'))return;a.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/aktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);a.disabled=false}}});
+$('cancelGrant').addEventListener('click',()=>$('grantDialog').close());$('grantForm').addEventListener('submit',async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const id=$('registrationId').value;const r=await api('/admin/kelola-akun/'+id+'/akses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('initialPassword').value})});$('grantDialog').close();msg(r.message+' ID Member/Login: '+r.member_id,true);await load()}catch(err){msg(err.message)}finally{b.disabled=false}});
 load();})();
 </script></body></html>""".replace("__USERNAME__", escape(username)))
 
@@ -1710,6 +1763,7 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
 <h2 class='section-title'>Menu Administrasi</h2>
 <section class='menu'>
 <article class='card'><div class='icon'>📝</div><div><h3>Verifikasi Pendaftaran Anggota</h3><p>Periksa pendaftaran, edit data yang keliru, setujui, minta perbaikan, atau tolak pendaftaran.</p><a class='btn' href='/admin/pendaftaran-anggota'>Buka Verifikasi</a></div></article>
+<article class='card'><div class='icon'>🗂️</div><div><h3>Daftar Seluruh Anggota</h3><p>Lihat seluruh anggota DPS dan DPSS yang sudah disetujui, termasuk foto profil dan dokumen identitas.</p><a class='btn' href='/admin/data-anggota'>Buka Data Anggota</a></div></article>
 <article class='card'><div class='icon'>👥</div><div><h3>Data Personel Petugas</h3><p>Lihat dan kelola data profil petugas yang sudah memiliki akun aplikasi.</p><a class='btn' href='/admin/data-personel'>Buka Data Personel</a></div></article>
 <article class='card'><div class='icon'>🔐</div><div><h3>Kelola Akses Aplikasi</h3><p>Pilih anggota terverifikasi yang ditugaskan, berikan akses, aktifkan kembali, atau cabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses</a></div></article>
 <article class='card'><div class='icon'>📍</div><div><h3>Data Survei dan Media</h3><p>Pantau data survei, lokasi GPS, dokumen, foto, video, dan hasil verifikasi yang tersimpan.</p><a class='btn' href='/admin'>Buka Data Survei</a></div></article>
@@ -1969,7 +2023,6 @@ def verify_pimpinan_or_admin(credentials: HTTPBasicCredentials = Depends(admin_s
 
 
 class OfficerAccessGrant(BaseModel):
-    member_id: str = Field(min_length=2, max_length=50)
     password: str = Field(min_length=10, max_length=200)
 
 
@@ -1979,7 +2032,7 @@ def list_verified_members_for_app_access(username: str = Depends(verify_pimpinan
     with get_db() as connection:
         rows = connection.execute("""
             SELECT r.id, r.full_name, r.nik, r.phone, r.org_level, r.org_position,
-                   r.region, r.linked_member_id AS member_id,
+                   r.region, r.member_code, r.linked_member_id AS login_member_id,
                    v.village_name, o.active AS account_active
             FROM organization_member_registrations r
             LEFT JOIN villages v ON v.id = r.village_id
@@ -1996,7 +2049,6 @@ def grant_app_access_to_verified_member(
     username: str = Depends(verify_pimpinan_or_admin),
 ):
     """Buat/aktifkan kredensial aplikasi hanya untuk anggota yang sudah disetujui."""
-    member_id = payload.member_id.strip().upper()
     with get_db() as connection:
         registration = connection.execute(
             "SELECT * FROM organization_member_registrations WHERE id=%s AND status='approved'",
@@ -2008,6 +2060,9 @@ def grant_app_access_to_verified_member(
             raise HTTPException(status_code=422, detail="Tingkat kepengurusan anggota tidak valid untuk akses aplikasi survei.")
         if registration["org_level"] == "DPSS" and not registration["village_id"]:
             raise HTTPException(status_code=422, detail="Data anggota DPSS belum memiliki desa penugasan. Perbaiki data pendaftarannya terlebih dahulu.")
+        member_id = (registration.get("linked_member_id") or registration.get("member_code") or "").strip().upper()
+        if not member_id:
+            raise HTTPException(status_code=409, detail="ID anggota belum terbentuk. Periksa data wilayah pendaftaran.")
         linked_id = (registration.get("linked_member_id") or "").strip().upper()
         if linked_id and linked_id != member_id:
             raise HTTPException(status_code=409, detail=f"Anggota ini sudah terhubung dengan ID login {linked_id}. Gunakan ID tersebut atau periksa tautan data.")
@@ -2274,6 +2329,54 @@ def _officer_profile_rows(search_text=""):
               f"%{search_text}%", f"%{search_text}%", f"%{search_text}%")).fetchall()
 
 
+@app.get("/admin/data-anggota/{registration_id}/dokumen-identitas")
+def admin_view_member_identity_document(registration_id: int, username: str = Depends(verify_admin)):
+    """Buat signed URL baru saat admin membuka dokumen identitas anggota."""
+    with get_db() as connection:
+        row = connection.execute("SELECT ktp_path FROM organization_member_registrations WHERE id=%s AND status='approved'", (registration_id,)).fetchone()
+    if not row or not row.get("ktp_path"):
+        raise HTTPException(status_code=404, detail="Dokumen identitas anggota tidak ditemukan.")
+    signed_url = create_supabase_signed_url(row["ktp_path"], expires_in=300, bucket=_officer_private_bucket())
+    if not signed_url:
+        raise HTTPException(status_code=502, detail="Dokumen identitas tidak dapat dibuka dari penyimpanan privat.")
+    return RedirectResponse(url=signed_url, status_code=302)
+
+
+@app.get("/admin/data-anggota", response_class=HTMLResponse)
+def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depends(verify_admin)):
+    """Direktori seluruh anggota yang telah disetujui, terpisah dari daftar akun aplikasi."""
+    tingkat = tingkat.strip().upper()
+    if tingkat not in {"SEMUA", "DPS", "DPSS"}:
+        tingkat = "SEMUA"
+    term = q.strip()
+    with get_db() as connection:
+        rows = connection.execute("""SELECT r.*,v.village_name
+            FROM organization_member_registrations r
+            LEFT JOIN villages v ON v.id=r.village_id
+            WHERE r.status='approved' AND (%s='SEMUA' OR r.org_level=%s)
+              AND (%s='' OR r.full_name ILIKE %s OR r.member_code ILIKE %s OR r.nik ILIKE %s
+                   OR r.phone ILIKE %s OR r.org_position ILIKE %s OR r.region ILIKE %s
+                   OR COALESCE(v.village_name,'') ILIKE %s)
+            ORDER BY r.org_level,r.region,v.village_name,r.full_name""",
+            (tingkat,tingkat,term,*([f"%{term}%"]*7))).fetchall()
+    cards=[]
+    for r in rows:
+        photo_url=create_supabase_signed_url(r['profile_photo_path'],1800,_officer_private_bucket()) if r['profile_photo_path'] else None
+        has_ktp=bool(r['ktp_path'])
+        photo_html=f"<img class='photo' src='{_lead_e(photo_url)}' alt='Foto {_lead_e(r['full_name'])}'>" if photo_url else "<div class='photo no-photo'>Foto belum tersedia</div>"
+        doc_html=f"<a class='btn doc' href='/admin/data-anggota/{int(r['id'])}/dokumen-identitas' target='_blank' rel='noopener'>Lihat Dokumen Identitas</a>" if has_ktp else "<span class='muted'>Dokumen identitas belum tersedia</span>"
+        birth_date=r['birth_date'].isoformat() if r['birth_date'] else '-'
+        village=r['village_name'] or ('Seluruh Desa' if r['org_level']=='DPS' else '-')
+        cards.append(f"""<article class='member-card'>{photo_html}<div class='member-data'><div class='topline'><div><h2>{_lead_e(r['full_name'])}</h2><span class='id'>ID Member: {_lead_e(r['member_code'] or '-')}</span></div><span class='level'>{_lead_e(r['org_level'])}</span></div>
+        <div class='details'><div><b>NIK</b><span>{_lead_e(r['nik'])}</span></div><div><b>Jenis Kelamin</b><span>{_lead_e(r['gender'] or '-')}</span></div><div><b>Tempat, Tanggal Lahir</b><span>{_lead_e(r['birth_place'] or '-')}, {_lead_e(birth_date)}</span></div><div><b>Nomor HP / WhatsApp</b><span>{_lead_e(r['phone'] or '-')}</span></div><div><b>Email</b><span>{_lead_e(r['email'] or '-')}</span></div><div><b>Jabatan</b><span>{_lead_e(r['org_position'])}</span></div><div><b>Wilayah</b><span>{_lead_e(r['region'] or '-')} · {_lead_e(village)}</span></div><div class='wide'><b>Alamat</b><span>{_lead_e(r['address'] or '-')}</span></div></div><div class='doc-row'>{doc_html}<a class='btn light' href='/admin/pendaftaran-anggota/{int(r['id'])}/edit'>Edit Data</a></div></div></article>""")
+    cards_html=''.join(cards) or "<div class='empty'>Belum ada anggota terverifikasi yang sesuai dengan pencarian.</div>"
+    html=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daftar Seluruh Anggota | Triple 555</title>
+    <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPS dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
+    <nav class='nav'><a class='btn light' href='/admin/dashboard'>Dashboard Utama Admin</a><a class='btn light' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a><a class='btn light' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran</a></nav>
+    <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
+    return HTMLResponse(html)
+
+
 @app.get("/admin/data-personel", response_class=HTMLResponse)
 def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
     rows = _officer_profile_rows(q.strip())
@@ -2527,14 +2630,20 @@ def submit_public_member_registration(
     photo_path = _upload_officer_private(profile_photo, code, "profile")
     ktp_path = _upload_officer_private(ktp_photo, code, "ktp")
     with get_db() as connection:
+        village_name = ""
+        if village_id is not None:
+            village_row = connection.execute("SELECT village_name FROM villages WHERE id=%s", (village_id,)).fetchone()
+            village_name = village_row["village_name"] if village_row else ""
+        # Nomor dialokasikan dan baris pendaftaran disimpan dalam transaksi yang sama.
+        member_code = _allocate_member_code(connection, org_level, region, village_name)
         connection.execute("""INSERT INTO organization_member_registrations
-            (registration_code,full_name,nik,birth_place,birth_date,gender,address,phone,email,
+            (registration_code,member_code,full_name,nik,birth_place,birth_date,gender,address,phone,email,
              org_level,org_position,region,village_id,profile_photo_path,ktp_path)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (code,full_name,nik,birth_place.strip(),birth_date.strip() or None,gender,address,phone,email,
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (code,member_code,full_name,nik,birth_place.strip(),birth_date.strip() or None,gender,address,phone,email,
              org_level,org_position,region,village_id,photo_path,ktp_path))
     return HTMLResponse(f"""<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <title>Pendaftaran diterima</title><body style='font:16px system-ui;background:#f4f0eb;padding:24px'><main style='max-width:600px;margin:8vh auto;background:white;padding:28px;border-radius:14px;border-top:6px solid #d8b15a'><h2 style='color:#5b1018'>Data berhasil dikirim</h2><p>Terima kasih. Pendaftaran anggota telah diterima dan menunggu pemeriksaan admin.</p><p><b>Kode pendaftaran: {escape(code)}</b></p><p>Simpan kode ini untuk keperluan konfirmasi.</p><p><a href='/pendaftaran-anggota' style='display:inline-block;background:#5b1018;color:#fff;text-decoration:none;padding:11px 16px;border-radius:8px'>Kembali ke Formulir</a></p></main></body></html>""")
+    <title>Pendaftaran diterima</title><body style='font:16px system-ui;background:#f4f0eb;padding:24px'><main style='max-width:600px;margin:8vh auto;background:white;padding:28px;border-radius:14px;border-top:6px solid #d8b15a'><h2 style='color:#5b1018'>Data berhasil dikirim</h2><p>Terima kasih. Pendaftaran anggota telah diterima dan menunggu pemeriksaan admin.</p><p><b>ID Member: {escape(member_code)}</b></p><p><b>Kode pendaftaran: {escape(code)}</b></p><p>Simpan ID Member dan kode pendaftaran ini untuk keperluan administrasi.</p><p><a href='/pendaftaran-anggota' style='display:inline-block;background:#5b1018;color:#fff;text-decoration:none;padding:11px 16px;border-radius:8px'>Kembali ke Formulir</a></p></main></body></html>""")
 
 
 @app.get("/admin/pendaftaran-anggota", response_class=HTMLResponse)
@@ -2554,13 +2663,13 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
         ktp=create_supabase_signed_url(r['ktp_path'],1800,_officer_private_bucket()) if r['ktp_path'] else None
         photo_html=f"<img src='{_lead_e(photo)}' style='width:100px;height:100px;object-fit:cover;border-radius:10px'>" if photo else ''
         ktp_html=f"<a target='_blank' rel='noopener' href='{_lead_e(ktp)}'>Lihat KTP</a>" if ktp else 'Tidak ada'
-        cards.append(f"""<article class='card'><div class='head'>{photo_html}<div><b>{_lead_e(r['full_name'])}</b><div>{_lead_e(r['registration_code'])} · {_lead_e(r['status'].upper())}</div><div>{_lead_e(r['org_level'])} · {_lead_e(r['org_position'])}</div></div></div>
+        cards.append(f"""<article class='card'><div class='head'>{photo_html}<div><b>{_lead_e(r['full_name'])}</b><div>{_lead_e(r['registration_code'])} · ID Member: {_lead_e(r.get('member_code') or '-')} · {_lead_e(r['status'].upper())}</div><div>{_lead_e(r['org_level'])} · {_lead_e(r['org_position'])}</div></div></div>
         <p><b>NIK:</b> {_lead_e(r['nik'])} · <b>HP:</b> {_lead_e(r['phone'])}</p><p><b>Wilayah:</b> {_lead_e(r['region'])} · {_lead_e(('Seluruh Desa' if r['org_level']=='DPS' and not r['village_id'] else (r['village_name'] or '-')))}</p>
         <p><b>Alamat:</b> {_lead_e(r['address'])}</p><p><b>Dokumen:</b> {ktp_html}</p>
         <p style='display:flex;gap:8px;flex-wrap:wrap'><a href='/admin/pendaftaran-anggota/{int(r['id'])}/edit' style='display:inline-block;background:#8a5b16;color:white;padding:9px 12px;border-radius:7px;text-decoration:none'>Edit Data</a></p>
         <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}/hapus' onsubmit="return confirm('Hapus permanen pendaftaran ini? Akun personel dan riwayat survei tidak akan dihapus.')"><button type='submit' style='background:#9b2226'>Hapus Pendaftaran</button></form>
         <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}'><label>Status pemeriksaan</label><select name='new_status'><option value='pending' {'selected' if r['status']=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if r['status']=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if r['status']=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if r['status']=='rejected' else ''}>Ditolak</option></select>
-        <label>Catatan admin</label><textarea name='admin_note' rows='2'>{_lead_e(r['admin_note'])}</textarea><label>ID anggota resmi (opsional, untuk menghubungkan akun yang sudah ada)</label><input name='linked_member_id' value='{_lead_e(r['linked_member_id'])}' maxlength='50'><button type='submit'>Simpan Pemeriksaan</button></form></article>""")
+        <label>Catatan admin</label><textarea name='admin_note' rows='2'>{_lead_e(r['admin_note'])}</textarea><p><b>ID Member otomatis:</b> {_lead_e(r.get('member_code') or '-')}<br><small>ID login aplikasi akan menggunakan ID Member ini setelah admin memberikan akses.</small></p><button type='submit'>Simpan Pemeriksaan</button></form></article>""")
     content=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Pendaftaran Anggota</title><style>
     body{{font:14px system-ui;background:#f4f0eb;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:16px 20px;border-bottom:4px solid #d8b15a}}header .brand{{max-width:1100px;margin:auto;display:flex;align-items:center;gap:14px}}header .brand img{{width:62px;height:62px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0 0 4px}}main{{max-width:1100px;margin:auto;padding:18px}}.card{{background:white;padding:17px;border-radius:12px;margin:12px 0;border:1px solid #e5ddd4}}.head{{display:flex;gap:14px;align-items:center}}label{{display:block;font-weight:bold;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d5cec7;border-radius:8px;box-sizing:border-box;font:inherit}}button{{background:#5b1018;color:white;border:0;padding:11px 15px;border-radius:8px;margin-top:12px}}.filters{{display:flex;gap:8px;flex-wrap:wrap}}.filters>*{{padding:9px;border-radius:8px}}a{{color:#5b1018}}small{{color:#777}}
     </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Verifikasi Pendaftaran Anggota 555</h1><div>Admin organisasi · dokumen identitas hanya ditampilkan di halaman ini</div></div></div></header><main>
@@ -2632,8 +2741,20 @@ def admin_edit_member_registration(
     new_photo = _upload_officer_private(profile_photo, row['registration_code'], "profile") if profile_photo and profile_photo.filename else row['profile_photo_path']
     new_ktp = _upload_officer_private(ktp_photo, row['registration_code'], "ktp") if ktp_photo and ktp_photo.filename else row['ktp_path']
     with get_db() as connection:
-        connection.execute("""UPDATE organization_member_registrations SET full_name=%s,nik=%s,gender=%s,birth_place=%s,birth_date=%s,address=%s,phone=%s,email=%s,org_level=%s,org_position=%s,region=%s,village_id=%s,profile_photo_path=%s,ktp_path=%s,updated_at=NOW() WHERE id=%s""",
-            (full_name,nik,gender,birth_place.strip(),birth_date.strip() or None,address,phone,email,org_level,org_position,region,village_id_value,new_photo,new_ktp,registration_id))
+        new_member_code = row.get('member_code') or ''
+        if not row.get('linked_member_id'):
+            new_village_name = ''
+            if village_id_value is not None:
+                new_village_row = connection.execute("SELECT village_name FROM villages WHERE id=%s", (village_id_value,)).fetchone()
+                new_village_name = new_village_row['village_name'] if new_village_row else ''
+            old_village_name = ''
+            if row.get('village_id'):
+                old_village_row = connection.execute("SELECT village_name FROM villages WHERE id=%s", (row['village_id'],)).fetchone()
+                old_village_name = old_village_row['village_name'] if old_village_row else ''
+            if _member_code_prefix(row['org_level'], row['region'], old_village_name) != _member_code_prefix(org_level, region, new_village_name):
+                new_member_code = _allocate_member_code(connection, org_level, region, new_village_name)
+        connection.execute("""UPDATE organization_member_registrations SET member_code=%s,full_name=%s,nik=%s,gender=%s,birth_place=%s,birth_date=%s,address=%s,phone=%s,email=%s,org_level=%s,org_position=%s,region=%s,village_id=%s,profile_photo_path=%s,ktp_path=%s,updated_at=NOW() WHERE id=%s""",
+            (new_member_code,full_name,nik,gender,birth_place.strip(),birth_date.strip() or None,address,phone,email,org_level,org_position,region,village_id_value,new_photo,new_ktp,registration_id))
         if row['linked_member_id'] and row['status']=='approved':
             officer = connection.execute("SELECT id FROM officers WHERE member_id=%s", (row['linked_member_id'],)).fetchone()
             if officer:
@@ -2674,15 +2795,17 @@ def admin_delete_member_registration(registration_id: int, username: str = Depen
 @app.post("/admin/pendaftaran-anggota/{registration_id}")
 def admin_review_member_registration(
     registration_id: int, new_status: str = Form(...), admin_note: str = Form(""),
-    linked_member_id: str = Form(""), username: str = Depends(verify_admin),
+    username: str = Depends(verify_admin),
 ):
     if new_status not in {"pending", "revision", "approved", "rejected"}:
         raise HTTPException(status_code=422, detail="Status pemeriksaan tidak valid.")
-    linked_member_id = linked_member_id.strip().upper()
     with get_db() as connection:
         row = connection.execute("SELECT * FROM organization_member_registrations WHERE id=%s", (registration_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan.")
+        # Jika anggota lama sudah terhubung ke akun, sinkronkan profilnya. Pendaftaran baru
+        # tidak meminta admin mengetik ID; ID login ditetapkan otomatis saat akses diberikan.
+        linked_member_id = (row.get("linked_member_id") or "").strip().upper()
         if linked_member_id and new_status == "approved":
             officer = connection.execute("SELECT id FROM officers WHERE member_id=%s", (linked_member_id,)).fetchone()
             if officer:
@@ -2697,11 +2820,9 @@ def admin_review_member_registration(
                 connection.execute("UPDATE officers SET member_name=%s,role=%s,region=%s,updated_at=NOW() WHERE id=%s",
                     (row['full_name'],row['org_level'],row['region'],officer['id']))
                 connection.execute("UPDATE members SET member_name=%s WHERE member_id=%s", (row['full_name'],linked_member_id))
-            elif new_status == 'approved':
-                raise HTTPException(status_code=422, detail="ID anggota belum terhubung ke akun DPS/DPSS. Kosongkan ID atau gunakan ID akun yang sudah ada.")
         connection.execute("""UPDATE organization_member_registrations SET status=%s,admin_note=%s,
-            linked_member_id=%s,updated_at=NOW(),reviewed_at=NOW() WHERE id=%s""",
-            (new_status,admin_note.strip(),linked_member_id,registration_id))
+            updated_at=NOW(),reviewed_at=NOW() WHERE id=%s""",
+            (new_status,admin_note.strip(),registration_id))
     return RedirectResponse(url="/admin/pendaftaran-anggota?status="+new_status, status_code=303)
 
 
