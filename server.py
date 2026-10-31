@@ -62,15 +62,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/.png")
-def get_():
-    #  utama berada di static/.png pada repository.
+@app.get("/logo.png")
+def get_logo():
+    # Logo utama berada di static/logo.png pada repository.
     base_dir = Path(__file__).parent
-    candidates = [base_dir / "static" / ".png", base_dir / ".png"]
-    _path = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if _path is None:
-        raise HTTPException(status_code=404, detail=" tidak ditemukan di static/.png")
-    return FileResponse(_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+    candidates = [base_dir / "static" / "logo.png", base_dir / "logo.png"]
+    logo_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if logo_path is None:
+        raise HTTPException(status_code=404, detail="Logo tidak ditemukan di static/logo.png")
+    return FileResponse(logo_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 # =========================================================
 # KONEKSI DATABASE
@@ -2246,12 +2246,11 @@ def public_member_registration_form():
     h2{{font-size:18px;margin:0 0 13px;color:var(--maroon)}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
     label{{display:block;font-weight:650;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:11px;border:1px solid #d5cec7;border-radius:8px;font:inherit;background:white}}
     input[type=file]{{padding:8px}}.full{{grid-column:1/-1}}.hint{{font-size:13px;color:#6b625c;margin:5px 0}}button{{background:var(--maroon);color:white;border:0;border-radius:9px;padding:13px 20px;font:inherit;font-weight:700;cursor:pointer}}
-    .notice{{background:#fff7e5;border-left:4px solid var(--gold);padding:12px;border-radius:7px;font-size:13px}}.hp{{position:absolute;left:-10000px}}
-    header .brand img{{width:76px;height:76px;object-fit:contain;background:transparent;padding:0;border:0;border-radius:0}}@media(max-width:620px){{header .brand img{{width:58px;height:58px}}header .brand h1{{font-size:20px}}.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
+    .notice{{background:#fff7e5;border-left:4px solid var(--gold);padding:12px;border-radius:7px;font-size:13px}}
+    @media(max-width:620px){{header .brand img{{width:58px;height:58px}}header .brand h1{{font-size:20px}}.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
     </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Pendataan Mandiri Anggota</h1><p>Ikatan Persaudaraan Triple 555</p></div></div></header>
     <main><div class='panel'><div class='notice'><b>Petunjuk:</b> Formulir ini diisi oleh masing-masing anggota. Data akan diperiksa admin sebelum ditetapkan sebagai data resmi organisasi. Pastikan NIK dan nomor HP benar. Foto KTP hanya dapat diakses admin yang berwenang.</div>
     <form method='post' action='/pendaftaran-anggota' enctype='multipart/form-data'>
-    <input class='hp' name='website' tabindex='-1' autocomplete='off'>
     <h2 style='margin-top:18px'>1. Identitas anggota</h2><div class='grid'>
     <div class='full'><label>Nama lengkap sesuai KTP *</label><input name='full_name' required maxlength='150' autocomplete='name'></div>
     <div><label>NIK *</label><input name='nik' required minlength='16' maxlength='16' inputmode='numeric' pattern='[0-9]{{16}}' title='NIK harus 16 digit'></div>
@@ -2264,14 +2263,40 @@ def public_member_registration_form():
     <div><label>Tingkat kepengurusan *</label><select name='org_level' id='org_level' required><option value=''>Pilih</option><option value='DPS'>DPS · Kecamatan</option><option value='DPSS'>DPSS · Desa/Kelurahan</option></select></div>
     <div><label>Jabatan organisasi sesuai SK *</label><input name='org_position' required maxlength='150' placeholder='Isi jabatan sesuai SK pengangkatan'></div>
     <div><label>Wilayah / Kecamatan *</label><input name='region' required maxlength='150' value='Tambang'></div>
-    <div><label>Desa / Kelurahan (untuk DPSS)</label><select name='village_id'><option value=''>Pilih desa jika berlaku</option>{village_options}</select></div>
+    <div><label id='village_label'>Cakupan wilayah desa</label><select name='village_id' id='village_id'><option value='all'>Seluruh Desa (cakupan DPS)</option>{village_options}</select><p class='hint' id='village_hint'>Untuk DPS, pilih Seluruh Desa atau pilih desa tertentu bila penugasan hanya mencakup desa tersebut.</p></div>
     </div><p class='hint'>Isi jabatan persis seperti yang tercantum dalam SK. Admin akan memeriksa kesesuaian tingkat dan wilayah.</p></div>
     <div class='panel'><h2>3. Foto dan dokumen</h2>
     <label>Foto profil *</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp' required><p class='hint'>JPG, PNG, atau WEBP. Maksimal 5 MB.</p>
     <label>Foto / scan KTP *</label><input type='file' name='ktp_photo' accept='image/jpeg,image/png,image/webp' required><p class='hint'>Pastikan tulisan pada KTP terbaca. File disimpan di penyimpanan privat.</p>
     <label>Dokumen SK (opsional, PDF/JPG/PNG belum diaktifkan pada tahap ini)</label><p class='hint'>Untuk sementara, dokumen SK dapat diperiksa admin secara terpisah. Formulir ini hanya menerima foto profil dan KTP.</p>
     </div><div class='panel'><div class='notice'>Dengan mengirim formulir ini, anggota menyatakan data yang diisi benar dan menyetujui penggunaannya untuk administrasi internal organisasi 555.</div><p style='margin:16px 0 0'><button type='submit'>Kirim Data Anggota</button></p></div>
-    </form></main></body></html>"""
+    </form><script>
+    (function(){{
+      const level=document.getElementById('org_level');
+      const village=document.getElementById('village_id');
+      const label=document.getElementById('village_label');
+      const hint=document.getElementById('village_hint');
+      function syncVillage(){{
+        if(level.value==='DPSS'){{
+          label.textContent='Desa / Kelurahan DPSS *';
+          hint.textContent='Untuk DPSS, wajib pilih desa tempat kepengurusan.';
+          village.required=true;
+          if(village.value==='all') village.value='';
+          village.options[0].textContent='Pilih desa';
+          village.options[0].value='';
+        }}else{{
+          label.textContent='Cakupan wilayah desa';
+          hint.textContent='Untuk DPS, pilih Seluruh Desa atau pilih desa tertentu bila penugasan hanya mencakup desa tersebut.';
+          village.required=false;
+          village.options[0].textContent='Seluruh Desa (cakupan DPS)';
+          village.options[0].value='all';
+          if(!village.value) village.value='all';
+        }}
+      }}
+      level.addEventListener('change',syncVillage);
+      syncVillage();
+    }})();
+    </script></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -2280,15 +2305,21 @@ def submit_public_member_registration(
     full_name: str = Form(...), nik: str = Form(...), gender: str = Form(...),
     birth_place: str = Form(""), birth_date: str = Form(""), address: str = Form(...),
     phone: str = Form(...), email: str = Form(""), org_level: str = Form(...),
-    org_position: str = Form(...), region: str = Form(...), village_id: int | None = Form(None),
-    website: str = Form(""), profile_photo: UploadFile | None = File(None),
+    org_position: str = Form(...), region: str = Form(...), village_id: str = Form("all"),
+    profile_photo: UploadFile | None = File(None),
     ktp_photo: UploadFile | None = File(None),
 ):
-    if website.strip():
-        raise HTTPException(status_code=400, detail="Permintaan tidak valid.")
     full_name, nik, gender = full_name.strip(), re.sub(r"\D", "", nik), gender.strip()
     address, phone, email = address.strip(), phone.strip(), email.strip()
     org_level, org_position, region = org_level.strip().upper(), org_position.strip(), region.strip()
+    village_value = (village_id or "").strip().lower()
+    if village_value in {"", "all", "semua"}:
+        village_id = None
+    else:
+        try:
+            village_id = int(village_value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Pilihan desa tidak valid.") from exc
     if len(full_name) < 3 or len(nik) != 16 or gender not in {"Laki-laki", "Perempuan"}:
         raise HTTPException(status_code=422, detail="Periksa nama, NIK 16 digit, dan jenis kelamin.")
     if not address or len(phone) < 8 or org_level not in {"DPS", "DPSS"} or len(org_position) < 2 or not region:
@@ -2323,7 +2354,7 @@ def submit_public_member_registration(
             (code,full_name,nik,birth_place.strip(),birth_date.strip() or None,gender,address,phone,email,
              org_level,org_position,region,village_id,photo_path,ktp_path))
     return HTMLResponse(f"""<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <title>Pendaftaran diterima</title><body style='font:16px system-ui;background:#f4f0eb;padding:24px'><main style='max-width:600px;margin:8vh auto;background:white;padding:28px;border-radius:14px;border-top:6px solid #d8b15a'><h2 style='color:#5b1018'>Data berhasil dikirim</h2><p>Terima kasih. Pendaftaran anggota telah diterima dan menunggu pemeriksaan admin.</p><p><b>Kode pendaftaran: {escape(code)}</b></p><p>Simpan kode ini untuk keperluan konfirmasi.</p></main></body></html>""")
+    <title>Pendaftaran diterima</title><body style='font:16px system-ui;background:#f4f0eb;padding:24px'><main style='max-width:600px;margin:8vh auto;background:white;padding:28px;border-radius:14px;border-top:6px solid #d8b15a'><h2 style='color:#5b1018'>Data berhasil dikirim</h2><p>Terima kasih. Pendaftaran anggota telah diterima dan menunggu pemeriksaan admin.</p><p><b>Kode pendaftaran: {escape(code)}</b></p><p>Simpan kode ini untuk keperluan konfirmasi.</p><p><a href='/pendaftaran-anggota' style='display:inline-block;background:#5b1018;color:#fff;text-decoration:none;padding:11px 16px;border-radius:8px'>Kembali ke Formulir</a></p></main></body></html>""")
 
 
 @app.get("/admin/pendaftaran-anggota", response_class=HTMLResponse)
@@ -2344,7 +2375,7 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
         photo_html=f"<img src='{_lead_e(photo)}' style='width:100px;height:100px;object-fit:cover;border-radius:10px'>" if photo else ''
         ktp_html=f"<a target='_blank' rel='noopener' href='{_lead_e(ktp)}'>Lihat KTP</a>" if ktp else 'Tidak ada'
         cards.append(f"""<article class='card'><div class='head'>{photo_html}<div><b>{_lead_e(r['full_name'])}</b><div>{_lead_e(r['registration_code'])} · {_lead_e(r['status'].upper())}</div><div>{_lead_e(r['org_level'])} · {_lead_e(r['org_position'])}</div></div></div>
-        <p><b>NIK:</b> {_lead_e(r['nik'])} · <b>HP:</b> {_lead_e(r['phone'])}</p><p><b>Wilayah:</b> {_lead_e(r['region'])} · {_lead_e(r['village_name'] or '-')}</p>
+        <p><b>NIK:</b> {_lead_e(r['nik'])} · <b>HP:</b> {_lead_e(r['phone'])}</p><p><b>Wilayah:</b> {_lead_e(r['region'])} · {_lead_e(('Seluruh Desa' if r['org_level']=='DPS' and not r['village_id'] else (r['village_name'] or '-')))}</p>
         <p><b>Alamat:</b> {_lead_e(r['address'])}</p><p><b>Dokumen:</b> {ktp_html}</p>
         <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}'><label>Status pemeriksaan</label><select name='new_status'><option value='pending' {'selected' if r['status']=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if r['status']=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if r['status']=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if r['status']=='rejected' else ''}>Ditolak</option></select>
         <label>Catatan admin</label><textarea name='admin_note' rows='2'>{_lead_e(r['admin_note'])}</textarea><label>ID anggota resmi (opsional, untuk menghubungkan akun yang sudah ada)</label><input name='linked_member_id' value='{_lead_e(r['linked_member_id'])}' maxlength='50'><button type='submit'>Simpan Pemeriksaan</button></form></article>""")
