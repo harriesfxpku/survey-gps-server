@@ -64,10 +64,13 @@ app.add_middleware(
 
 @app.get("/logo.png")
 def get_logo():
-    logo_path = Path(__file__).parent / "logo.png"
-    if not logo_path.exists():
-        return {"error": "Logo tidak ditemukan"}
-    return FileResponse(logo_path, media_type="image/png")
+    # Logo utama berada di static/logo.png pada repository.
+    base_dir = Path(__file__).parent
+    candidates = [base_dir / "static" / "logo.png", base_dir / "logo.png"]
+    logo_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if logo_path is None:
+        raise HTTPException(status_code=404, detail="Logo tidak ditemukan di static/logo.png")
+    return FileResponse(logo_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 # =========================================================
 # KONEKSI DATABASE
@@ -2238,14 +2241,14 @@ def public_member_registration_form():
     :root{{--maroon:#5b1018;--deep:#31090e;--gold:#d8b15a}}*{{box-sizing:border-box}}
     body{{margin:0;background:#f4f0eb;color:#292323;font:15px/1.5 system-ui,Arial,sans-serif}}
     header{{background:linear-gradient(120deg,var(--deep),var(--maroon));color:#fff;padding:25px 18px;border-bottom:4px solid var(--gold)}}
-    header div,main{{max-width:850px;margin:auto}}h1{{margin:0 0 5px;font-size:25px}}header p{{margin:0;color:#f3e5d0}}
+    header .brand{{max-width:850px;margin:auto;display:flex;align-items:center;gap:16px}}header .brand img{{width:76px;height:76px;object-fit:contain;border-radius:50%;background:#fff;padding:4px;border:2px solid var(--gold)}}header .brand h1{{margin:0 0 5px;font-size:25px}}header .brand p{{margin:0;color:#f3e5d0}}
     main{{padding:20px 14px 45px}}.panel{{background:white;border:1px solid #e5ddd4;border-radius:14px;padding:20px;margin-bottom:15px;box-shadow:0 3px 14px #3b1b1010}}
     h2{{font-size:18px;margin:0 0 13px;color:var(--maroon)}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
     label{{display:block;font-weight:650;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:11px;border:1px solid #d5cec7;border-radius:8px;font:inherit;background:white}}
     input[type=file]{{padding:8px}}.full{{grid-column:1/-1}}.hint{{font-size:13px;color:#6b625c;margin:5px 0}}button{{background:var(--maroon);color:white;border:0;border-radius:9px;padding:13px 20px;font:inherit;font-weight:700;cursor:pointer}}
     .notice{{background:#fff7e5;border-left:4px solid var(--gold);padding:12px;border-radius:7px;font-size:13px}}.hp{{position:absolute;left:-10000px}}
-    @media(max-width:620px){{.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
-    </style></head><body><header><div><h1>Pendataan Mandiri Anggota</h1><p>Ikatan Persaudaraan Triple 555</p></div></header>
+    @media(max-width:620px){{header .brand img{{width:58px;height:58px}}header .brand h1{{font-size:20px}}.grid{{grid-template-columns:1fr}}.full{{grid-column:auto}}main{{padding:12px}}.panel{{padding:15px}}}}
+    </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Pendataan Mandiri Anggota</h1><p>Ikatan Persaudaraan Triple 555</p></div></div></header>
     <main><div class='panel'><div class='notice'><b>Petunjuk:</b> Formulir ini diisi oleh masing-masing anggota. Data akan diperiksa admin sebelum ditetapkan sebagai data resmi organisasi. Pastikan NIK dan nomor HP benar. Foto KTP hanya dapat diakses admin yang berwenang.</div>
     <form method='post' action='/pendaftaran-anggota' enctype='multipart/form-data'>
     <input class='hp' name='website' tabindex='-1' autocomplete='off'>
@@ -2346,8 +2349,8 @@ def admin_member_registration_list(status: str = "pending", q: str = "", usernam
         <form method='post' action='/admin/pendaftaran-anggota/{int(r['id'])}'><label>Status pemeriksaan</label><select name='new_status'><option value='pending' {'selected' if r['status']=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if r['status']=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if r['status']=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if r['status']=='rejected' else ''}>Ditolak</option></select>
         <label>Catatan admin</label><textarea name='admin_note' rows='2'>{_lead_e(r['admin_note'])}</textarea><label>ID anggota resmi (opsional, untuk menghubungkan akun yang sudah ada)</label><input name='linked_member_id' value='{_lead_e(r['linked_member_id'])}' maxlength='50'><button type='submit'>Simpan Pemeriksaan</button></form></article>""")
     content=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Pendaftaran Anggota</title><style>
-    body{{font:14px system-ui;background:#f4f0eb;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:20px}}main{{max-width:1100px;margin:auto;padding:18px}}.card{{background:white;padding:17px;border-radius:12px;margin:12px 0;border:1px solid #e5ddd4}}.head{{display:flex;gap:14px;align-items:center}}label{{display:block;font-weight:bold;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d5cec7;border-radius:8px;box-sizing:border-box;font:inherit}}button{{background:#5b1018;color:white;border:0;padding:11px 15px;border-radius:8px;margin-top:12px}}.filters{{display:flex;gap:8px;flex-wrap:wrap}}.filters>*{{padding:9px;border-radius:8px}}a{{color:#5b1018}}small{{color:#777}}
-    </style></head><body><header><h1>Verifikasi Pendaftaran Anggota 555</h1><div>Admin organisasi · dokumen identitas hanya ditampilkan di halaman ini</div></header><main>
+    body{{font:14px system-ui;background:#f4f0eb;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:16px 20px;border-bottom:4px solid #d8b15a}}header .brand{{max-width:1100px;margin:auto;display:flex;align-items:center;gap:14px}}header .brand img{{width:62px;height:62px;object-fit:contain;border-radius:50%;background:#fff;padding:3px}}header h1{{margin:0 0 4px}}main{{max-width:1100px;margin:auto;padding:18px}}.card{{background:white;padding:17px;border-radius:12px;margin:12px 0;border:1px solid #e5ddd4}}.head{{display:flex;gap:14px;align-items:center}}label{{display:block;font-weight:bold;margin:10px 0 5px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d5cec7;border-radius:8px;box-sizing:border-box;font:inherit}}button{{background:#5b1018;color:white;border:0;padding:11px 15px;border-radius:8px;margin-top:12px}}.filters{{display:flex;gap:8px;flex-wrap:wrap}}.filters>*{{padding:9px;border-radius:8px}}a{{color:#5b1018}}small{{color:#777}}
+    </style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Ikatan Persaudaraan Triple 555'><div><h1>Verifikasi Pendaftaran Anggota 555</h1><div>Admin organisasi · dokumen identitas hanya ditampilkan di halaman ini</div></div></div></header><main>
     <form class='filters' method='get'><select name='status'><option value='pending' {'selected' if status=='pending' else ''}>Menunggu</option><option value='revision' {'selected' if status=='revision' else ''}>Perlu perbaikan</option><option value='approved' {'selected' if status=='approved' else ''}>Disetujui</option><option value='rejected' {'selected' if status=='rejected' else ''}>Ditolak</option><option value='all' {'selected' if status=='all' else ''}>Semua</option></select><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, HP, kode'><button type='submit'>Tampilkan</button></form>
     <p><a href='/admin/data-personel'>Kembali ke data personel</a></p>{''.join(cards) if cards else '<p>Belum ada pendaftaran pada kategori ini.</p>'}</main></body></html>"""
     return HTMLResponse(content)
