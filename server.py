@@ -960,39 +960,25 @@ def home():
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#160609">
-<meta name="description" content="Portal resmi pendaftaran anggota Ikatan Persaudaraan Triple 555.">
-<title>555 | Mari Bergabung Bersama</title>
+<title>555 | Pendaftaran Anggota</title>
 <style>
-:root{color-scheme:dark;--wine:#5b1018;--wine2:#21070c;--gold:#d8b15a;--gold2:#f6df9e;--cream:#fff2d3;--muted:#d1c0b7}
-*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100vh;overflow-x:hidden;background:radial-gradient(ellipse at 78% 32%,#50151d 0,transparent 35%),linear-gradient(135deg,#090609 0%,#1c080d 48%,#090609 100%);color:#fff5e9;font:15px/1.6 Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
-a{color:inherit;text-decoration:none}.top-glow{height:4px;background:linear-gradient(90deg,#6b0c18,#f4d47e,#9b1b25,#d8b15a)}
-.nav{max-width:1240px;margin:auto;padding:20px 28px;display:flex;align-items:center;justify-content:space-between;gap:18px;border:0!important;background:transparent!important;box-shadow:none!important}
-.brand{display:flex;align-items:center;gap:13px}.brand img{width:58px;height:58px;object-fit:contain;border-radius:50%;border:1px solid var(--gold);padding:3px;background:#24090e;box-shadow:0 0 25px #d8b15a22}.brand strong{display:block;color:var(--gold2);font-size:16px;letter-spacing:.12em}.brand small{color:#c9b5a8;font-size:10px;letter-spacing:.2em;text-transform:uppercase}.nav-pill{border:1px solid #d8b15a66;border-radius:99px;padding:8px 15px;color:#f1d99e;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
-main{max-width:1240px;margin:auto;padding:18px 28px 54px}.hero{position:relative;isolation:isolate;min-height:570px;display:grid;grid-template-columns:1.05fr .95fr;align-items:center;gap:20px;padding:48px 54px;border:1px solid #d8b15a44!important;border-radius:24px;overflow:hidden;background:linear-gradient(112deg,#25070d 0%,#650d19 54%,#24080e 100%)!important;box-shadow:0 24px 70px #0008}
-.hero:before{content:"";position:absolute;z-index:-1;inset:0;background:radial-gradient(ellipse at 78% 48%,#e0a83b33,transparent 32%),linear-gradient(145deg,transparent 48%,#0c070a88 100%)}
-.hero:after{content:"";position:absolute;z-index:-1;left:-8%;right:-8%;bottom:-108px;height:220px;transform:rotate(-5deg);background:linear-gradient(180deg,#d7a33d 0 7%,#fff0c8 7% 11%,#a81725 11% 48%,#4b0711 48% 100%);border-top:2px solid #f4d98e;box-shadow:0 -10px 40px #0005}
-.copy{max-width:650px}.eyebrow{display:inline-flex;align-items:center;gap:9px;padding:7px 13px;border:1px solid #e6c46c88;border-radius:99px;background:#17080c66;color:#f4d98e;font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase}.eyebrow:before{content:"";width:7px;height:7px;border-radius:50%;background:#f2cb68;box-shadow:0 0 13px #f2cb68}
-h1{max-width:650px;margin:23px 0 16px;font-size:clamp(42px,5.4vw,70px);line-height:1.02;letter-spacing:-.045em;color:#fff4df!important}.gold{display:block;color:#f3d17c;text-shadow:0 3px 22px #0007}.lead{max-width:560px;margin:0;color:#e2d0c5;font-size:17px;line-height:1.8}.actions{display:flex;flex-wrap:wrap;gap:13px;margin-top:30px}.btn-main,.btn-ghost{display:inline-flex;align-items:center;justify-content:center;gap:12px;min-height:50px;padding:13px 22px;border-radius:12px;font-weight:850;transition:transform .18s,filter .18s}.btn-main{background:linear-gradient(110deg,#ffe69a,#d6a43c 62%,#f5d77f);color:#27130b;box-shadow:0 10px 28px #08030777;border:1px solid #ffe7a8}.btn-ghost{background:#19080c66;color:#f7e8c5;border:1px solid #e5ca8b77}.btn-main:hover,.btn-ghost:hover{transform:translateY(-2px);filter:brightness(1.08)}.fine{margin:16px 0 0;color:#c7b5aa;font-size:12px}
-.art{position:relative;min-height:440px;display:grid;place-items:center}.halo{position:absolute;width:min(92%,430px);aspect-ratio:1;border-radius:50%;background:radial-gradient(circle,#d8a34233 0,#8d1b2633 43%,transparent 70%);filter:blur(5px)}.ring{position:absolute;width:min(86%,390px);aspect-ratio:1;border:1px solid #f2d17b66;border-radius:50%;box-shadow:0 0 0 18px #e5b9500b,0 0 70px #d8a34222,inset 0 0 55px #d8a34215}.ring:before,.ring:after{content:"";position:absolute;inset:9%;border:1px solid #e7c16c44;border-radius:50%}.ring:after{inset:20%;border-color:#e7c16c33}.garuda-wrap{position:relative;z-index:2;width:min(100%,430px);display:grid;place-items:center;filter:drop-shadow(0 18px 24px #0009)}.garuda-svg{width:100%;height:auto;overflow:visible}.garuda-caption{position:absolute;bottom:-12px;padding:7px 16px;border:1px solid #d8b15a77;border-radius:99px;background:#1b080deF;color:#f4d88e;font-size:10px;font-weight:800;letter-spacing:.2em;text-transform:uppercase;white-space:nowrap}.float{position:absolute;z-index:3;min-width:180px;padding:13px 16px;border:1px solid #d8b15a66;border-radius:13px;background:linear-gradient(145deg,#30151aee,#13090df2);box-shadow:0 14px 35px #0008}.float b{display:block;color:#f4d88e;font-size:12px;letter-spacing:.06em}.float span{color:#cbbab0;font-size:11px}.float.one{top:13%;right:0}.float.two{bottom:12%;left:0}.star{position:absolute;width:7px;height:7px;border-radius:50%;background:#f2d17c;box-shadow:0 0 16px #f2d17c}.star.a{top:18%;left:13%}.star.b{right:14%;bottom:20%}
-.info{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:22px}.info-card{padding:20px;border:1px solid #d8b15a3d;border-radius:16px;background:linear-gradient(145deg,#281419,#150c10);box-shadow:0 10px 28px #0004}.info-icon{width:40px;height:40px;display:grid;place-items:center;border:1px solid #d8b15a66;border-radius:12px;color:#f2d17c;font-size:19px;margin-bottom:12px}.info-card h2{margin:0 0 6px;color:#f2d17c!important;font-size:16px}.info-card p{margin:0;color:#cdbdb4;font-size:13px;line-height:1.7}.steps{margin-top:30px;padding:22px 24px;border:1px solid #d8b15a33;border-radius:16px;background:#160b0f99}.steps h2{margin:0 0 16px;color:#f2d17c!important;font-size:17px}.step-list{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.step{display:flex;align-items:center;gap:11px;color:#e6d8cc;font-size:13px}.num{flex:0 0 31px;width:31px;height:31px;display:grid;place-items:center;border-radius:50%;background:linear-gradient(135deg,#f2d17c,#b77d24);color:#28140b;font-weight:900}
-footer{max-width:1240px;margin:auto;padding:0 28px 24px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#9f8c84;font-size:11px}footer b{color:#d8b15a}
-@media(max-width:850px){.hero{grid-template-columns:1fr;padding:34px 28px}.art{grid-row:1;min-height:330px}.copy{grid-row:2}.garuda-wrap{width:min(100%,330px)}.ring{width:315px}.float.one{right:3%;top:8%}.float.two{left:2%;bottom:7%}.info{grid-template-columns:1fr}.step-list{grid-template-columns:1fr}}
-@media(max-width:520px){.nav{padding:15px 17px}.brand img{width:47px;height:47px}.brand strong{font-size:13px}.brand small{font-size:8px}.nav-pill{font-size:9px;padding:7px 10px}main{padding:8px 13px 32px}.hero{padding:23px 19px;border-radius:17px;min-height:0}.art{min-height:275px}.garuda-wrap{width:min(100%,275px)}.ring{width:255px}.float{min-width:140px;padding:9px 11px}.float b{font-size:10px}.float span{font-size:9px}h1{font-size:42px}.lead{font-size:14px}.actions{display:grid}.btn-main,.btn-ghost{width:100%}.info-card{padding:17px}.steps{padding:18px}footer{padding:0 16px 20px;font-size:10px}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{transition:none!important}}
+:root{color-scheme:dark;--gold:#d8b15a;--gold2:#f6df9e}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow-x:hidden;background:radial-gradient(ellipse at 50% 42%,#57131d 0,#260910 42%,#090609 100%);color:#fff5e9;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
+.top-glow{height:4px;background:linear-gradient(90deg,#6b0c18,#f4d47e,#9b1b25,#d8b15a)}
+header{max-width:1240px;margin:auto;padding:20px 28px;display:flex;align-items:center}
+.brand{display:flex;align-items:center;gap:13px;text-decoration:none}.brand img{width:62px;height:62px;object-fit:contain;border-radius:50%;border:1px solid #d8b15a;padding:3px;background:#24090e;box-shadow:0 0 25px #d8b15a22}.brand strong{display:block;color:var(--gold2);font-size:16px;letter-spacing:.12em}.brand small{color:#c9b5a8;font-size:10px;letter-spacing:.2em;text-transform:uppercase}
+main{min-height:calc(100vh - 110px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:10px 20px 58px;text-align:center}.art{position:relative;width:min(90vw,570px);display:grid;place-items:center;margin:0 auto 18px}.halo{position:absolute;width:92%;aspect-ratio:1;border-radius:50%;background:radial-gradient(circle,#d8a34238 0,#8d1b2633 45%,transparent 72%);filter:blur(6px)}.ring{position:absolute;width:82%;aspect-ratio:1;border:1px solid #f2d17b66;border-radius:50%;box-shadow:0 0 0 18px #e5b9500b,0 0 70px #d8a34222,inset 0 0 55px #d8a34215}.ring:before,.ring:after{content:"";position:absolute;inset:9%;border:1px solid #e7c16c44;border-radius:50%}.ring:after{inset:20%;border-color:#e7c16c33}.garuda{position:relative;z-index:1;width:100%;height:auto;filter:drop-shadow(0 18px 24px #0009)}
+.cta{position:relative;z-index:2;display:inline-flex;align-items:center;justify-content:center;gap:13px;min-height:58px;min-width:245px;padding:15px 30px;border:1px solid #ffe7a8;border-radius:12px;background:linear-gradient(110deg,#ffe69a,#d6a43c 62%,#f5d77f);color:#27130b;text-decoration:none;font-size:15px;font-weight:900;letter-spacing:.09em;box-shadow:0 10px 32px #08030799;transition:transform .18s,filter .18s}.cta:hover{transform:translateY(-2px);filter:brightness(1.08)}
+@media(max-width:520px){header{padding:15px 17px}.brand img{width:49px;height:49px}.brand strong{font-size:13px}.brand small{font-size:8px}.art{width:min(96vw,390px);margin-bottom:8px}.cta{width:min(90vw,330px);min-height:54px;font-size:13px}}
+@media(prefers-reduced-motion:reduce){.cta{transition:none}}
 </style>
 </head>
 <body><div class="top-glow"></div>
-<header class="nav"><a class="brand" href="/" aria-label="Beranda Triple 555"><img src="/logo.png" alt="Logo Ikatan Persaudaraan Triple 555"><span><strong>TRIPLE 555</strong><small>Ikatan Persaudaraan</small></span></a><span class="nav-pill">Portal Pendaftaran Anggota</span></header>
+<header><a class="brand" href="/" aria-label="Logo Ikatan Persaudaraan Triple 555"><img src="/logo.png" alt="Logo resmi 555"><span><strong>TRIPLE 555</strong><small>Ikatan Persaudaraan</small></span></a></header>
 <main>
-<section class="hero">
-  <div class="copy"><span class="eyebrow">Bersatu · Berkarya · Untuk Negeri</span>
-    <h1>Mari Bergabung <span class="gold">Bersama 555</span></h1>
-    <p class="lead">Jadilah bagian dari Ikatan Persaudaraan Triple 555. Daftarkan identitas dan kepengurusan Anda melalui portal resmi anggota, dengan proses yang tertib, mudah, dan transparan.</p>
-    <div class="actions"><a class="btn-main" href="/pendaftaran-anggota">Daftar Anggota Sekarang <span aria-hidden="true">→</span></a><a class="btn-ghost" href="#alur">Pelajari Proses Pendaftaran</a></div>
-    <p class="fine">Setiap pendaftaran akan diperiksa oleh admin sebelum ditetapkan sebagai data resmi organisasi.</p>
-  </div>
-  <div class="art" role="img" aria-label="Ilustrasi burung Garuda berwarna emas sebagai ornamen halaman pendaftaran"><div class="halo"></div><div class="ring"></div><i class="star a"></i><i class="star b"></i>
-    <div class="garuda-wrap"><svg class="garuda-svg" viewBox="0 0 520 390" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Garuda emas bersayap terbentang">
+  <div class="art" role="img" aria-label="Ornamen Garuda berwarna emas dengan sayap terbentang">
+    <div class="halo"></div><div class="ring"></div>
+    <svg class="garuda" viewBox="0 0 520 390" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <defs><linearGradient id="gGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff0b0"/><stop offset=".42" stop-color="#e5bd62"/><stop offset="1" stop-color="#9d651d"/></linearGradient><linearGradient id="gLight" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#ffedac"/><stop offset="1" stop-color="#bd852e"/></linearGradient></defs>
       <g fill="url(#gGold)" stroke="#8d5c20" stroke-width="2.2" stroke-linejoin="round">
         <path d="M252 151 C207 106 133 66 16 61 C58 92 76 119 87 148 C52 135 28 137 8 149 C68 170 104 199 133 235 C96 224 68 229 45 245 C112 255 163 279 211 310 L260 278 L309 310 C357 279 408 255 475 245 C452 229 424 224 387 235 C416 199 452 170 512 149 C492 137 468 135 433 148 C444 119 462 92 504 61 C387 66 313 106 268 151 Z"/>
@@ -1002,18 +988,12 @@ footer{max-width:1240px;margin:auto;padding:0 28px 24px;display:flex;justify-con
         <path d="M238 167 L260 182 L282 167 L291 224 L260 260 L229 224 Z" fill="#5b1018" stroke="#f1d17a" stroke-width="3"/>
         <path d="M250 284 L260 317 L270 284 L291 334 L260 358 L229 334 Z"/>
         <path d="M225 205 L190 227 L220 238 L244 226 M295 205 L330 227 L300 238 L276 226" fill="none" stroke="#8d5c20" stroke-width="5"/>
-        <path d="M245 119 Q260 104 275 119 L269 143 L251 143 Z" fill="#fff0b0"/>
-        <path d="M260 111 Q276 92 294 103 L280 120 Z"/>
-        <path d="M285 119 L318 126 L288 137 Z" fill="#f5d77f"/>
-      </g>
-      <g fill="none" stroke="#fff0b0" stroke-width="2" opacity=".8"><path d="M34 83 Q111 103 168 171 M67 157 Q133 178 188 222 M486 83 Q409 103 352 171 M453 157 Q387 178 332 222"/><path d="M260 153 V279"/></g>
-    </svg><span class="garuda-caption">Bersatu · Berkarya · Untuk Negeri</span></div>
-    <div class="float one"><b>IDENTITAS ANGGOTA</b><span>Pendataan resmi dan terstruktur</span></div><div class="float two"><b>BERSAMA 555</b><span>Solid dalam persaudaraan</span></div></div>
-</section>
-<section class="info" aria-label="Informasi pendaftaran"><article class="info-card"><div class="info-icon" aria-hidden="true">✦</div><h2>Persyaratan Pendaftaran</h2><p>Siapkan identitas sesuai dokumen resmi, nomor kontak aktif, foto diri, dan foto KTP yang terbaca jelas.</p></article><article class="info-card"><div class="info-icon" aria-hidden="true">⌖</div><h2>Data Kepengurusan</h2><p>Pilih tingkat DPS atau DPSS, isi jabatan, serta tentukan wilayah kepengurusan sesuai penugasan organisasi.</p></article><article class="info-card"><div class="info-icon" aria-hidden="true">✓</div><h2>Verifikasi Admin</h2><p>Admin akan memeriksa kelengkapan dan kesesuaian data sebelum pendaftaran disetujui.</p></article></section>
-<section class="steps" id="alur"><h2>Alur Pendaftaran Anggota</h2><div class="step-list"><div class="step"><span class="num">1</span><span>Isi formulir dan lengkapi dokumen.</span></div><div class="step"><span class="num">2</span><span>Kirim pendaftaran untuk diperiksa admin.</span></div><div class="step"><span class="num">3</span><span>Tunggu hasil pemeriksaan dan persetujuan.</span></div></div></section>
-</main><footer><span>© 2026 <b>Ikatan Persaudaraan Triple 555</b></span><span>Portal Resmi Pendaftaran Anggota</span></footer>
-</body></html>"""
+        <path d="M245 119 Q260 104 275 119 L269 143 L251 143 Z" fill="#fff0b0"/><path d="M260 111 Q276 92 294 103 L280 120 Z"/><path d="M285 119 L318 126 L288 137 Z" fill="#f5d77f"/>
+      </g><g fill="none" stroke="#fff0b0" stroke-width="2" opacity=".8"><path d="M34 83 Q111 103 168 171 M67 157 Q133 178 188 222 M486 83 Q409 103 352 171 M453 157 Q387 178 332 222"/><path d="M260 153 V279"/></g>
+    </svg>
+  </div>
+  <a class="cta" href="/pendaftaran-anggota">DAFTAR ANGGOTA <span aria-hidden="true">→</span></a>
+</main></body></html>"""
     return HTMLResponse(html)
 
 
