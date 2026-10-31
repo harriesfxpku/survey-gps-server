@@ -109,6 +109,24 @@ async def apply_theme2_to_all_html(request: Request, call_next):
                 html = html.replace("</head>", _THEME2_GLOBAL_CSS + "</head>", 1)
             else:
                 html = _THEME2_GLOBAL_CSS + html
+        # Perbaikan khusus halaman Data Survei Admin (/admin):
+        # latar sel dibuat terang dan teks marun agar terbaca jelas.
+        if request.url.path.rstrip("/") == "/admin":
+            admin_survey_css = r"""<style id="admin-survey-table-contrast">
+.admin-survey-table td, .tablewrap td, table tbody td {
+    color: #5b1018 !important;
+    background-color: #fff8ef !important;
+}
+.admin-survey-table tbody tr:hover td, .tablewrap tbody tr:hover td, table tbody tr:hover td {
+    background-color: #f3e5d2 !important;
+}
+.admin-survey-table td a, .tablewrap td a, table tbody td a {
+    color: #5b1018 !important;
+    font-weight: 700 !important;
+}
+</style>"""
+            if "id=\"admin-survey-table-contrast\"" not in html:
+                html = html.replace("</head>", admin_survey_css + "</head>", 1) if "</head>" in html else admin_survey_css + html
         headers = dict(response.headers)
         headers.pop("content-length", None)
         headers.pop("content-encoding", None)
