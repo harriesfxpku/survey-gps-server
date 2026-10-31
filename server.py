@@ -986,21 +986,10 @@ main{min-height:calc(100vh - 110px);display:flex;flex-direction:column;align-ite
 <body class="landing-page"><div class="top-glow"></div>
 <header><a class="brand" href="/" aria-label="Logo Ikatan Persaudaraan Triple 555"><img src="/logo.png" alt="Logo resmi 555"><span><strong>TRIPLE 555</strong><small>Ikatan Persaudaraan</small></span></a></header>
 <main>
-  <div class="art" role="img" aria-label="Ornamen Garuda berwarna emas dengan sayap terbentang">
-    <div class="halo"></div><div class="ring"></div>
-    <svg class="garuda" viewBox="0 0 520 390" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <defs><linearGradient id="gGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff0b0"/><stop offset=".42" stop-color="#e5bd62"/><stop offset="1" stop-color="#9d651d"/></linearGradient><linearGradient id="gLight" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#ffedac"/><stop offset="1" stop-color="#bd852e"/></linearGradient></defs>
-      <g fill="url(#gGold)" stroke="#8d5c20" stroke-width="2.2" stroke-linejoin="round">
-        <path d="M252 151 C207 106 133 66 16 61 C58 92 76 119 87 148 C52 135 28 137 8 149 C68 170 104 199 133 235 C96 224 68 229 45 245 C112 255 163 279 211 310 L260 278 L309 310 C357 279 408 255 475 245 C452 229 424 224 387 235 C416 199 452 170 512 149 C492 137 468 135 433 148 C444 119 462 92 504 61 C387 66 313 106 268 151 Z"/>
-        <path d="M251 159 C213 127 161 101 91 91 C133 125 159 158 177 193 C143 181 116 181 91 190 C147 209 184 238 224 272 L260 253 L296 272 C336 238 373 209 429 190 C404 181 377 181 343 193 C361 158 387 125 429 91 C359 101 307 127 269 159 Z" fill="url(#gLight)"/>
-        <path d="M260 119 C240 89 235 58 247 30 C256 44 263 53 270 57 C278 39 291 28 309 22 C302 44 302 61 311 76 C329 70 343 72 357 82 C335 88 322 103 313 126 L297 164 L223 164 L207 126 C198 103 185 88 163 82 C177 72 191 70 209 76 C218 61 218 44 211 22 C229 28 242 39 250 57 C257 53 264 44 273 30 C285 58 280 89 260 119 Z"/>
-        <path d="M228 151 Q260 129 292 151 L306 226 Q289 263 260 287 Q231 263 214 226 Z" fill="url(#gLight)"/>
-        <path d="M238 167 L260 182 L282 167 L291 224 L260 260 L229 224 Z" fill="#5b1018" stroke="#f1d17a" stroke-width="3"/>
-        <path d="M250 284 L260 317 L270 284 L291 334 L260 358 L229 334 Z"/>
-        <path d="M225 205 L190 227 L220 238 L244 226 M295 205 L330 227 L300 238 L276 226" fill="none" stroke="#8d5c20" stroke-width="5"/>
-        <path d="M245 119 Q260 104 275 119 L269 143 L251 143 Z" fill="#fff0b0"/><path d="M260 111 Q276 92 294 103 L280 120 Z"/><path d="M285 119 L318 126 L288 137 Z" fill="#f5d77f"/>
-      </g><g fill="none" stroke="#fff0b0" stroke-width="2" opacity=".8"><path d="M34 83 Q111 103 168 171 M67 157 Q133 178 188 222 M486 83 Q409 103 352 171 M453 157 Q387 178 332 222"/><path d="M260 153 V279"/></g>
-    </svg>
+  <div class="art">
+    <div class="halo"></div>
+    <div class="ring"></div>
+  </div>
   </div>
   <a class="cta" href="/pendaftaran-anggota">DAFTAR ANGGOTA <span aria-hidden="true">→</span></a>
 </main></body></html>"""
