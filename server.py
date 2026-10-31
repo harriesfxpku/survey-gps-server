@@ -964,14 +964,16 @@ class SurveyCreate(BaseModel):
 def home():
     """Landing publik Theme 2; CTA tetap menuju formulir pendaftaran yang sudah ada."""
     html = """<!doctype html>
-<html lang="id">
+<html lang="id" class="landing-page">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#160609">
 <title>555 | Pendaftaran Anggota</title>
 <style>
 :root{color-scheme:dark;--gold:#d8b15a;--gold2:#f6df9e}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow-x:hidden;background:linear-gradient(180deg,rgba(8,4,7,.30),rgba(8,4,7,.48)),url("/landing-background") center center / cover no-repeat fixed;color:#fff5e9;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
+*{box-sizing:border-box}
+html.landing-page,body.landing-page{background:linear-gradient(180deg,rgba(8,4,7,.30),rgba(8,4,7,.48)),url("/landing-background") center center / cover no-repeat fixed !important;background-color:#100709 !important}
+body.landing-page{margin:0;min-height:100vh;overflow-x:hidden;color:#fff5e9;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
 .top-glow{height:4px;background:linear-gradient(90deg,#6b0c18,#f4d47e,#9b1b25,#d8b15a)}
 header{max-width:1240px;margin:auto;padding:20px 28px;display:flex;align-items:center}
 .brand{display:flex;align-items:center;gap:13px;text-decoration:none}.brand img{width:62px;height:62px;object-fit:contain;border-radius:50%;border:1px solid #d8b15a;padding:3px;background:#24090e;box-shadow:0 0 25px #d8b15a22}.brand strong{display:block;color:var(--gold2);font-size:16px;letter-spacing:.12em}.brand small{color:#c9b5a8;font-size:10px;letter-spacing:.2em;text-transform:uppercase}
@@ -981,7 +983,7 @@ main{min-height:calc(100vh - 110px);display:flex;flex-direction:column;align-ite
 @media(prefers-reduced-motion:reduce){.cta{transition:none}}
 </style>
 </head>
-<body><div class="top-glow"></div>
+<body class="landing-page"><div class="top-glow"></div>
 <header><a class="brand" href="/" aria-label="Logo Ikatan Persaudaraan Triple 555"><img src="/logo.png" alt="Logo resmi 555"><span><strong>TRIPLE 555</strong><small>Ikatan Persaudaraan</small></span></a></header>
 <main>
   <div class="art" role="img" aria-label="Ornamen Garuda berwarna emas dengan sayap terbentang">
