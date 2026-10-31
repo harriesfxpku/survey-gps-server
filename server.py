@@ -2064,7 +2064,7 @@ def admin_dashboard(
             .media-video {{ display: block; width: 220px; max-width: 100%; margin: 4px 0; }}
             small {{ display: block; color: #64748b; margin-bottom: 8px; }}
             .muted {{ color: #64748b; }}
-            .delete-button {{ background: #b91c1c; color: #fff; border: 0; border-radius: 5px; padding: 8px 10px; cursor: pointer; }}
+            .delete-button {{ display: inline-flex; align-items: center; justify-content: center; min-width: 58px; height: 30px; box-sizing: border-box; padding: 4px 9px; background: #b91c1c; color: #fff; border: 0; border-radius: 9px; font-size: 12px; line-height: 1.2; font-weight: 700; cursor: pointer; white-space: nowrap; }}
             .delete-button:hover {{ background: #991b1b; }}
             form {{ margin: 0; }}
         </style>
