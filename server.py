@@ -992,7 +992,7 @@ main{min-height:calc(100vh - 110px);display:flex;flex-direction:column;align-ite
       </g><g fill="none" stroke="#fff0b0" stroke-width="2" opacity=".8"><path d="M34 83 Q111 103 168 171 M67 157 Q133 178 188 222 M486 83 Q409 103 352 171 M453 157 Q387 178 332 222"/><path d="M260 153 V279"/></g>
     </svg>
   </div>
-  <a class="cta" href="/pendaftaran-anggota">DAFTAR ANGGOTA <span aria-hidden="true">→</span></a>
+  <a class="cta" href="/pendaftaran-anggota">DAFTAR SEKARANG <span aria-hidden="true">→</span></a>
 </main></body></html>"""
     return HTMLResponse(html)
 
