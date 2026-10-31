@@ -94,18 +94,36 @@ def get_db():
 # ID ANGGOTA OTOMATIS BERDASARKAN WILAYAH
 # =========================================================
 
-def _member_slug(value: str, limit: int = 18) -> str:
-    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
-    return (value[:limit].strip("-") or "WILAYAH")
+def _member_short_code(value: str, aliases: dict[str, str] | None = None) -> str:
+    """Bentuk kode wilayah pendek, tanpa spasi atau tanda baca."""
+    normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    words = re.findall(r"[A-Za-z0-9]+", normalized.upper())
+    # Hilangkan awalan administratif agar kode tidak ikut memuat KEC/KAB/DESA.
+    words = [word for word in words if word not in {"KEC", "KECAMATAN", "KAB", "KABUPATEN", "DESA", "KEL", "KELURAHAN"}]
+    if not words:
+        return "WLY"
+    key = " ".join(words)
+    aliases = aliases or {}
+    if key in aliases:
+        return aliases[key]
+    # Nama dua kata atau lebih memakai inisial; nama satu kata memakai tiga huruf awal.
+    if len(words) > 1:
+        return "".join(word[0] for word in words)[:4]
+    return words[0][:3]
 
 
 def _member_code_prefix(org_level: str, region: str, village_name: str = "") -> str:
-    region_slug = _member_slug(region, 18)
+    """Prefix ringkas tanpa pemisah, misalnya DPSTBG001 dan DPSS TBG AST 001 (tanpa spasi pada ID)."""
+    region_code = _member_short_code(region, {
+        "TAMBANG": "TBG",
+    })
     if str(org_level).upper() == "DPSS":
-        village_slug = _member_slug(village_name, 18)
-        return f"DPSS-{region_slug}-{village_slug}"
-    return f"DPS-{region_slug}"
+        village_code = _member_short_code(village_name, {
+            "AUR SATI": "AST",
+            "BALAM JAYA": "BLJ",
+        })
+        return f"DPSS{region_code}{village_code}"
+    return f"DPS{region_code}"
 
 
 def _allocate_member_code(connection, org_level: str, region: str, village_name: str = "") -> str:
@@ -114,19 +132,20 @@ def _allocate_member_code(connection, org_level: str, region: str, village_name:
     connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (prefix,))
     existing = connection.execute(
         "SELECT member_code FROM organization_member_registrations WHERE member_code LIKE %s",
-        (prefix + "-%",),
+        (prefix + "%",),
     ).fetchall()
     used = []
+    pattern = re.compile(r"^" + re.escape(prefix) + r"(\d+)$", re.IGNORECASE)
     for row in existing:
-        tail = str(row.get("member_code") or "").rsplit("-", 1)[-1]
-        if tail.isdigit():
-            used.append(int(tail))
+        match = pattern.fullmatch(str(row.get("member_code") or "").strip())
+        if match:
+            used.append(int(match.group(1)))
     number = max(used, default=0) + 1
-    candidate = f"{prefix}-{number:03d}"
+    candidate = f"{prefix}{number:03d}"
     while connection.execute("""SELECT 1 FROM officers WHERE member_id=%s
             UNION ALL SELECT 1 FROM members WHERE member_id=%s LIMIT 1""", (candidate, candidate)).fetchone():
         number += 1
-        candidate = f"{prefix}-{number:03d}"
+        candidate = f"{prefix}{number:03d}"
     return candidate
 
 
@@ -566,6 +585,7 @@ class OfficerCreate(BaseModel):
 
 @app.post("/auth/login")
 def officer_login(payload: OfficerLogin):
+    member_id = payload.member_id.strip()
     with get_db() as connection:
         officer = connection.execute(
             "SELECT * FROM officers WHERE member_id = %s", (member_id,)
