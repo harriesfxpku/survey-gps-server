@@ -51,7 +51,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="Survei GPS API",
     description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.4.0-leadership-gps-map-and-personnel-dashboard",
+    version="3.5.0-personnel-profile-management",
 )
 
 app.add_middleware(
@@ -2000,9 +2000,10 @@ def _officer_private_bucket():
 def _upload_officer_private(file: UploadFile | None, member_id: str, kind: str) -> str:
     if file is None or not file.filename:
         return ""
-    content_type = (file.content_type or "").lower()
-    if not content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail=f"{kind}: berkas harus berupa gambar.")
+    content_type = (file.content_type or "").lower().split(";", 1)[0].strip()
+    allowed_types = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    if content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"{kind}: format harus JPG, PNG, atau WEBP.")
     data = file.file.read()
     if not data:
         raise HTTPException(status_code=400, detail=f"{kind}: berkas kosong.")
@@ -2012,9 +2013,7 @@ def _upload_officer_private(file: UploadFile | None, member_id: str, kind: str) 
     supabase_key = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
     if not supabase_url or not supabase_key:
         raise HTTPException(status_code=503, detail="Penyimpanan dokumen personel belum dikonfigurasi.")
-    ext = Path(file.filename).suffix.lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg" if content_type == "image/jpeg" else ".png" if content_type == "image/png" else ".webp"
+    ext = allowed_types[content_type]
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", member_id)
     object_path = f"{safe_id}/{kind}-{uuid.uuid4().hex}{ext}"
     bucket = _officer_private_bucket()
@@ -2067,10 +2066,11 @@ def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
     rows = _officer_profile_rows(q.strip())
     body = []
     for r in rows:
-        status = "Aktif" if r["active"] == 1 else "Belum aktif"
+        status = "Aktif" if r["active"] == 1 else "Nonaktif"
         photo = create_supabase_signed_url(r["profile_photo_path"], bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
         photo_html = f"<img class='avatar' src='{_lead_e(photo)}'>" if photo else "<div class='avatar blank'>Foto<br>belum ada</div>"
-        body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(r['region'] or r['villages'] or '-')}<br><small>{_lead_e(r['villages'])}</small></td><td>{status}</td><td><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Profil</a></td></tr>""")
+        territory = r["villages"] or r["region"] or "-"
+        body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(territory)}</td><td>{status}</td><td><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Data</a></td></tr>""")
     if not body:
         body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
@@ -2079,36 +2079,101 @@ def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
 
 
 @app.get("/admin/data-personel/{officer_id}", response_class=HTMLResponse)
-def admin_edit_data_personel(officer_id: int, username: str = Depends(verify_admin)):
+def admin_edit_data_personel(officer_id: int, request: Request, username: str = Depends(verify_admin)):
     with get_db() as connection:
         row = connection.execute("""
             SELECT o.id AS officer_id,o.member_id,o.member_name,o.role,o.region,o.active,
                    p.nik,p.phone,p.address,p.birth_place,p.birth_date,p.profile_photo_path,p.ktp_path
             FROM officers o LEFT JOIN officer_profiles p ON p.officer_id=o.id WHERE o.id=%s
         """, (officer_id,)).fetchone()
+        village_rows = connection.execute(
+            "SELECT id, village_name, district FROM villages WHERE active=1 ORDER BY district, village_name"
+        ).fetchall()
+        assigned_rows = connection.execute(
+            "SELECT village_id FROM officer_villages WHERE officer_id=%s", (officer_id,)
+        ).fetchall()
     if not row:
         raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+    assigned_ids = {v["village_id"] for v in assigned_rows}
+    village_controls = "".join(
+        f"<label class='village'><input type='checkbox' name='village_ids' value='{v['id']}' {'checked' if v['id'] in assigned_ids else ''}><span>{_lead_e(v['village_name'])} <small>· {_lead_e(v['district'])}</small></span></label>"
+        for v in village_rows
+    ) or "<p>Belum ada data desa aktif. Tambahkan melalui pengelolaan wilayah terlebih dahulu.</p>"
     photo = create_supabase_signed_url(row["profile_photo_path"], bucket=_officer_private_bucket()) if row["profile_photo_path"] else None
     ktp = create_supabase_signed_url(row["ktp_path"], bucket=_officer_private_bucket()) if row["ktp_path"] else None
-    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Edit Profil Personel</title><style>body{{font:14px system-ui;background:#f6f3ee;margin:0}}header{{background:#31090e;color:white;padding:20px}}main{{max-width:850px;margin:auto;padding:20px}}form,.panel{{background:white;padding:20px;border-radius:12px}}label{{display:block;font-weight:bold;margin:12px 0 5px}}input,textarea{{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;box-sizing:border-box}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}button,.btn{{display:inline-block;background:#5b1018;color:white;padding:10px 14px;border:0;border-radius:8px;text-decoration:none;margin-top:16px}}img{{max-width:180px;max-height:180px;object-fit:contain;margin:8px}}small{{color:#777}}@media(max-width:600px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><h1>Profil Personel</h1><div>{_lead_e(row['member_name'])} · {_lead_e(row['member_id'])} · {_lead_e(row['role'])}</div></header><main><p><a class='btn' href='/admin/data-personel'>Kembali ke daftar</a></p><form method='post' enctype='multipart/form-data' action='/admin/data-personel/{officer_id}'><div class='grid'><div><label>Nama lengkap</label><input value='{_lead_e(row['member_name'])}' disabled></div><div><label>Nomor identitas anggota</label><input value='{_lead_e(row['member_id'])}' disabled></div><div><label>NIK</label><input name='nik' value='{_lead_e(row['nik'] or '')}' maxlength='30'></div><div><label>Nomor HP</label><input name='phone' value='{_lead_e(row['phone'] or '')}' maxlength='30' required></div><div><label>Tempat lahir</label><input name='birth_place' value='{_lead_e(row['birth_place'] or '')}'></div><div><label>Tanggal lahir</label><input type='date' name='birth_date' value='{_lead_e(row['birth_date'].isoformat() if row['birth_date'] else '')}'></div></div><label>Alamat</label><textarea name='address' rows='3'>{_lead_e(row['address'] or '')}</textarea><label>Foto diri (JPG/PNG/WEBP, maks. 5 MB)</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src=\"{_lead_e(photo)}\">' if photo else '<small>Belum ada foto profil.</small>'}<label>Foto/scan KTP (JPG/PNG/WEBP, maks. 5 MB)</label><input type='file' name='ktp_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src=\"{_lead_e(ktp)}\">' if ktp else '<small>Belum ada dokumen KTP.</small>'}<p><button type='submit'>Simpan Profil</button></p></form></main></body></html>"""
+    saved = "<div class='notice'>Perubahan profil berhasil disimpan.</div>" if request.query_params.get("saved") == "1" else ""
+    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Edit Profil Personel</title><style>
+    body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:#31090e;color:white;padding:20px}}main{{max-width:900px;margin:auto;padding:20px}}form,.panel{{background:white;padding:20px;border-radius:12px;margin-bottom:14px}}label{{display:block;font-weight:bold;margin:12px 0 5px}}input,textarea,select{{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;box-sizing:border-box}}input[type=checkbox]{{width:18px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}button,.btn{{display:inline-block;background:#5b1018;color:white;padding:10px 14px;border:0;border-radius:8px;text-decoration:none;margin-top:16px;cursor:pointer}}img{{max-width:180px;max-height:180px;object-fit:contain;margin:8px}}small,.muted{{color:#777}}.village-list{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}}.village{{display:flex;align-items:center;gap:8px;border:1px solid #e4ded7;border-radius:8px;padding:8px;margin:0}}.notice{{background:#eaf7ef;color:#14532d;padding:10px;border-radius:8px;margin-bottom:12px}}@media(max-width:650px){{.grid,.village-list{{grid-template-columns:1fr}}}}
+    </style></head><body><header><h1>Pengelolaan Data Personel</h1><div>{_lead_e(row['member_name'])} · {_lead_e(row['member_id'])} · {_lead_e(row['role'])}</div></header><main><p><a class='btn' href='/admin/data-personel'>Kembali ke daftar personel</a></p>{saved}<form method='post' enctype='multipart/form-data' action='/admin/data-personel/{officer_id}'>
+    <h2>1. Data akun dan penugasan</h2><div class='grid'><div><label>Nama lengkap</label><input name='member_name' value='{_lead_e(row['member_name'])}' maxlength='100' required></div><div><label>ID anggota / petugas</label><input value='{_lead_e(row['member_id'])}' disabled></div>
+    <div><label>Peran</label><select name='role'><option value='DPSS' {'selected' if row['role']=='DPSS' else ''}>DPSS · Desa/Kelurahan</option><option value='DPS' {'selected' if row['role']=='DPS' else ''}>DPS · Kecamatan</option></select></div>
+    <div><label>Wilayah / Kecamatan</label><input name='region' value='{_lead_e(row['region'] or '')}' maxlength='150' placeholder='Contoh: Tambang'></div>
+    <div><label>Status akun</label><select name='active'><option value='1' {'selected' if row['active']==1 else ''}>Aktif</option><option value='0' {'selected' if row['active']!=1 else ''}>Nonaktif</option></select></div></div>
+    <label>Desa penugasan (khusus DPSS)</label><div class='village-list'>{village_controls}</div><p class='muted'>Pilih desa yang menjadi wilayah tugas petugas DPSS. Untuk akun DPS, daftar desa tidak digunakan.</p>
+    <h2 style='margin-top:28px'>2. Identitas dan kontak</h2><div class='grid'><div><label>NIK</label><input name='nik' value='{_lead_e(row['nik'] or '')}' maxlength='30' inputmode='numeric'></div><div><label>Nomor HP</label><input name='phone' value='{_lead_e(row['phone'] or '')}' maxlength='30' inputmode='tel'></div><div><label>Tempat lahir</label><input name='birth_place' value='{_lead_e(row['birth_place'] or '')}' maxlength='100'></div><div><label>Tanggal lahir</label><input type='date' name='birth_date' value='{_lead_e(row['birth_date'].isoformat() if row['birth_date'] else '')}'></div></div>
+    <label>Alamat lengkap</label><textarea name='address' rows='3'>{_lead_e(row['address'] or '')}</textarea>
+    <h2 style='margin-top:28px'>3. Dokumen personel</h2><label>Foto profil (JPG/PNG/WEBP, maksimal 5 MB)</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src="{_lead_e(photo)}" alt="Foto profil saat ini">' if photo else '<small>Belum ada foto profil.</small>'}
+    <label>Foto / scan KTP (JPG/PNG/WEBP, maksimal 5 MB)</label><input type='file' name='ktp_photo' accept='image/jpeg,image/png,image/webp'>{f'<img src="{_lead_e(ktp)}" alt="KTP tersimpan">' if ktp else '<small>Belum ada dokumen KTP.</small>'}
+    <p><button type='submit'>Simpan Seluruh Data Personel</button></p></form></main></body></html>"""
     return HTMLResponse(html)
 
 
 @app.post("/admin/data-personel/{officer_id}")
 def admin_save_data_personel(
     officer_id: int,
+    member_name: str = Form(...), role: str = Form(...), region: str = Form(""),
+    active: int = Form(1), village_ids: list[int] = Form([]),
     nik: str = Form(""), phone: str = Form(""), address: str = Form(""),
     birth_place: str = Form(""), birth_date: str = Form(""),
     profile_photo: UploadFile | None = File(None), ktp_photo: UploadFile | None = File(None),
     username: str = Depends(verify_admin),
 ):
+    member_name = member_name.strip()
+    role = role.strip().upper()
+    region = region.strip()
+    if len(member_name) < 2:
+        raise HTTPException(status_code=422, detail="Nama lengkap minimal 2 karakter.")
+    if role not in {"DPS", "DPSS"}:
+        raise HTTPException(status_code=422, detail="Peran hanya boleh DPS atau DPSS.")
+    if active not in (0, 1):
+        raise HTTPException(status_code=422, detail="Status akun tidak valid.")
+    if birth_date.strip():
+        try:
+            datetime.strptime(birth_date.strip(), "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Tanggal lahir tidak valid.") from exc
     with get_db() as connection:
         officer = connection.execute("SELECT id,member_id FROM officers WHERE id=%s", (officer_id,)).fetchone()
-    if not officer:
-        raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+        if not officer:
+            raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+        if role == "DPSS" and village_ids:
+            valid_villages = connection.execute(
+                "SELECT id FROM villages WHERE active=1 AND id=ANY(%s)", (village_ids,)
+            ).fetchall()
+            if len({v["id"] for v in valid_villages}) != len(set(village_ids)):
+                raise HTTPException(status_code=422, detail="Ada desa penugasan yang tidak valid atau tidak aktif.")
     photo_path = _upload_officer_private(profile_photo, officer["member_id"], "profile") if profile_photo and profile_photo.filename else ""
     ktp_path = _upload_officer_private(ktp_photo, officer["member_id"], "ktp") if ktp_photo and ktp_photo.filename else ""
     with get_db() as connection:
+        connection.execute(
+            "UPDATE officers SET member_name=%s, role=%s, region=%s, active=%s, updated_at=NOW() WHERE id=%s",
+            (member_name, role, region, active, officer_id),
+        )
+        connection.execute(
+            "UPDATE members SET member_name=%s, active=%s WHERE member_id=%s",
+            (member_name, active, officer["member_id"]),
+        )
+        if role == "DPSS":
+            connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer_id,))
+            for village_id in sorted(set(village_ids)):
+                connection.execute(
+                    "INSERT INTO officer_villages (officer_id,village_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                    (officer_id, village_id),
+                )
+        else:
+            connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer_id,))
+        if active == 0:
+            connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer_id,))
         connection.execute("""
             INSERT INTO officer_profiles (officer_id,nik,phone,address,birth_place,birth_date,profile_photo_path,ktp_path,updated_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
@@ -2131,7 +2196,7 @@ def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_
         photo = create_supabase_signed_url(r["profile_photo_path"], expires_in=1800, bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
         avatar = f"<img class='person-photo' src='{_lead_e(photo)}' alt='Foto {_lead_e(r['member_name'])}'>" if photo else "<div class='person-photo no-photo'>Foto<br>belum ada</div>"
         territory = r["villages"] or r["region"] or "-"
-        status = "<span class='status active'>AKTIF</span>" if r["active"] == 1 else "<span class='status inactive'>BELUM AKTIF</span>"
+        status = "<span class='status active'>AKTIF</span>" if r["active"] == 1 else "<span class='status inactive'>NONAKTIF</span>"
         cards.append(f"""<article class='person-card'>{avatar}<div class='person-info'><h3>{_lead_e(r['member_name'])}</h3><div class='muted'>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</div><p>☎ {_lead_e(r['phone'] or 'Nomor HP belum diisi')}</p><p>⌖ {_lead_e(territory)}</p>{status}</div></article>""")
     if not cards:
         cards = ["<div class='panel'>Belum ada akun personel yang sesuai.</div>"]
