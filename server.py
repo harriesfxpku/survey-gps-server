@@ -145,6 +145,14 @@ def get_logo():
         raise HTTPException(status_code=404, detail="Logo tidak ditemukan di static/logo.png")
     return FileResponse(logo_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
+@app.get("/landing-background")
+def get_landing_background():
+    # Gambar latar landing page disimpan di static/gambar halaman landing.png.
+    image_path = Path(__file__).parent / "static" / "gambar halaman landing.png"
+    if not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Gambar tidak ditemukan di static/gambar halaman landing.png")
+    return FileResponse(image_path, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
+
 # =========================================================
 # KONEKSI DATABASE
 # =========================================================
@@ -963,7 +971,7 @@ def home():
 <title>555 | Pendaftaran Anggota</title>
 <style>
 :root{color-scheme:dark;--gold:#d8b15a;--gold2:#f6df9e}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow-x:hidden;background:radial-gradient(ellipse at 50% 42%,#57131d 0,#260910 42%,#090609 100%);color:#fff5e9;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow-x:hidden;background:linear-gradient(180deg,rgba(8,4,7,.30),rgba(8,4,7,.48)),url("/landing-background") center center / cover no-repeat fixed;color:#fff5e9;font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}
 .top-glow{height:4px;background:linear-gradient(90deg,#6b0c18,#f4d47e,#9b1b25,#d8b15a)}
 header{max-width:1240px;margin:auto;padding:20px 28px;display:flex;align-items:center}
 .brand{display:flex;align-items:center;gap:13px;text-decoration:none}.brand img{width:62px;height:62px;object-fit:contain;border-radius:50%;border:1px solid #d8b15a;padding:3px;background:#24090e;box-shadow:0 0 25px #d8b15a22}.brand strong{display:block;color:var(--gold2);font-size:16px;letter-spacing:.12em}.brand small{color:#c9b5a8;font-size:10px;letter-spacing:.2em;text-transform:uppercase}
@@ -992,7 +1000,7 @@ main{min-height:calc(100vh - 110px);display:flex;flex-direction:column;align-ite
       </g><g fill="none" stroke="#fff0b0" stroke-width="2" opacity=".8"><path d="M34 83 Q111 103 168 171 M67 157 Q133 178 188 222 M486 83 Q409 103 352 171 M453 157 Q387 178 332 222"/><path d="M260 153 V279"/></g>
     </svg>
   </div>
-  <a class="cta" href="/pendaftaran-anggota">DAFTAR SEKARANG <span aria-hidden="true">→</span></a>
+  <a class="cta" href="/pendaftaran-anggota">DAFTAR ANGGOTA <span aria-hidden="true">→</span></a>
 </main></body></html>"""
     return HTMLResponse(html)
 
