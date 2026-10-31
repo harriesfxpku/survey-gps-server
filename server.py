@@ -2324,6 +2324,23 @@ def _lead_page(title, username, content):
 header{{background:linear-gradient(110deg,#19080c,#500813 55%,#26090e);color:white;padding:16px 26px;border-bottom:2px solid var(--gold);box-shadow:0 8px 30px #0006}}.brand{{display:flex;align-items:center;gap:14px}}.brand img{{width:64px;height:64px;object-fit:contain;border-radius:50%;background:#2b1114;padding:3px;border:2px solid var(--gold)}}header h1{{margin:0;font-size:clamp(22px,3vw,30px);color:#f7d77f}}header p{{margin:4px 0 0;color:#e8d8c7}}.user{{margin-top:5px;color:#d9c3a7;font-size:12px}}
 .shell{{display:grid;grid-template-columns:230px minmax(0,1fr);gap:22px;max-width:1740px;margin:auto;padding:22px 24px 40px}}.nav{{display:flex;flex-direction:column;gap:7px;background:linear-gradient(180deg,#26090f,#14080b);border:1px solid #6e3a3d;border-radius:16px;padding:15px 11px;align-self:start;min-height:calc(100vh - 160px);box-shadow:0 12px 28px #0005}}.nav:before{{content:'MENU PIMPINAN';font-size:10px;letter-spacing:1.8px;color:#c9a65a;padding:8px 12px}}
 a.btn,button{{display:inline-block;border:1px solid transparent;border-radius:9px;background:linear-gradient(110deg,#e9bd51,#b87a16);color:#24130a;padding:10px 13px;font:inherit;font-weight:750;text-decoration:none;cursor:pointer}}a.gold{{background:linear-gradient(110deg,#f0c85e,#bd821b);color:#24130a}}a.light{{background:#321b20;color:#f3dfb1;border:1px solid #644349}}
+/* Layout media laporan: berada di bawah data teks dan memenuhi lebar kolom laporan. */
+.lead-report-panel{{min-width:0;overflow:hidden}}
+.lead-report-tablewrap{{overflow-x:auto}}
+.lead-report-table{{width:100%;min-width:900px;table-layout:auto}}
+.lead-report-table .lead-report-data-row td{{background:#211417}}
+.lead-report-table .lead-report-media-row td{{padding:13px 12px 17px;background:#180d10;border-bottom:2px solid #765047}}
+.lead-media-gallery{{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px;width:100%;max-width:100%}}
+.lead-media-section{{flex:1 1 100%;min-width:0;margin:0;padding:0}}
+.lead-media-heading{{margin:0 0 8px;color:#e7c46e;font-size:12px;letter-spacing:.3px}}
+.lead-identity-grid,.lead-photo-grid,.lead-video-grid,.lead-media-unavailable-list{{display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px;width:100%;max-width:100%}}
+.lead-identity-item,.lead-photo-item,.lead-video-item,.lead-media-unavailable{{flex:0 1 150px;min-width:0;max-width:150px;padding:7px;border:1px solid #5b3939;border-radius:9px;background:#26191b;overflow:hidden}}
+.lead-media-label{{font-size:11px;font-weight:750;color:#e7c46e;margin-bottom:5px;overflow-wrap:anywhere}}
+.lead-identity-image,.lead-photo-image{{display:block;width:100%;height:105px;object-fit:contain;background:#10090b;border-radius:6px}}
+.lead-video-item video{{display:block;width:100%;height:105px;object-fit:contain;background:#10090b;border-radius:6px}}
+.lead-media-name{{font-size:10px;color:#c9b8ad;margin-top:5px;overflow-wrap:anywhere}}
+.lead-media-empty{{font-size:12px;color:#b8a8a0;padding:7px 0}}
+.lead-media-unavailable p{{font-size:11px;margin:4px 0;color:#d8c9c0;overflow-wrap:anywhere}}
 main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-radius:13px;padding:16px;margin:12px 0;box-shadow:0 8px 20px #0003;color:#f7eee5}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.metric strong{{display:block;font-size:27px;color:#f2c34f}}.metric span{{color:#c9b8ad}}
 .filters{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}label{{display:block;font-size:12px;font-weight:700;margin-bottom:5px;color:#e8cc8b}}input,select,textarea{{width:100%;min-height:40px;padding:9px;border:1px solid #624449;border-radius:8px;background:#180e11;color:#f8eee3;font:inherit}}.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}.tablewrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:850px}}th,td{{padding:10px;border-bottom:1px solid #493235;text-align:left;vertical-align:top}}th{{background:#301b20;color:#e7c46e;font-size:12px;white-space:nowrap}}td{{color:#eee3d9}}td small{{color:#b8a8a0}}.media{{display:flex;gap:8px;flex-wrap:wrap;max-width:300px}}.media img{{width:100px;height:78px;object-fit:cover;border-radius:7px;border:1px solid #624449}}.media video{{width:180px;max-width:100%;border-radius:7px}}.muted{{color:#b8a8a0}}
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
@@ -3266,23 +3283,23 @@ def _lead_report_html(rows, media_map, verification=False):
         media = _lead_media_html(media_map.get(r["survey_id"], []))
         if not verification:
             detail = "<br>".join(_lead_e(x) for x in [r.get("business_type"), r.get("business_location"), "Catatan: " + str(r.get("notes") or "")] if x)
-            body.append(f"<tr><td>{r['survey_id']}</td><td>{_lead_e(r.get('surveyed_at'))}</td><td>{_lead_e(r.get('officer_name'))}<br><small>{_lead_e(r.get('member_id'))}</small></td><td>{_lead_e(r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('applicant_phone'))}<br>{_lead_e(r.get('applicant_address'))}</td><td><b>{_lead_e(r.get('business_name'))}</b><br>{detail}</td><td>{_lead_e(r.get('capital_amount'))}<br><small>Omzet: {_lead_e(r.get('turnover_amount'))}</small></td><td>{media}</td></tr>")
+            body.append(f"<tr class='lead-report-data-row'><td>{r['survey_id']}</td><td>{_lead_e(r.get('surveyed_at'))}</td><td>{_lead_e(r.get('officer_name'))}<br><small>{_lead_e(r.get('member_id'))}</small></td><td>{_lead_e(r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('applicant_phone'))}<br>{_lead_e(r.get('applicant_address'))}</td><td><b>{_lead_e(r.get('business_name'))}</b><br>{detail}</td><td>{_lead_e(r.get('capital_amount'))}<br><small>Omzet: {_lead_e(r.get('turnover_amount'))}</small></td></tr><tr class='lead-report-media-row'><td colspan='7'>{media}</td></tr>")
         else:
             needs = r.get("needs") or []
             if isinstance(needs, str):
                 try: needs = json.loads(needs)
                 except ValueError: needs = []
             needs_text = "<br>".join(_lead_e(f"{n.get('item_name','Item')}: {n.get('quantity',0)} {n.get('unit','unit')} × Rp {n.get('unit_price',0)}") for n in needs if isinstance(n, dict)) or "-"
-            body.append(f"<tr><td>{r['survey_id']}</td><td>{_lead_e(r.get('verified_at'))}</td><td>{_lead_e(r.get('verifier_name'))}<br><small>{_lead_e(r.get('verifier_id'))}</small></td><td>{_lead_e(r.get('verifier_region') or r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('business_name'))}</td><td><b>{_lead_e(r.get('decision'))}</b><br>Kondisi: {_lead_e(r.get('business_condition'))}<br>Aktivitas: {_lead_e(r.get('actual_business_activity'))}<br>Kesesuaian: {_lead_e(r.get('data_match'))}<br>Catatan: {_lead_e(r.get('verification_notes'))}<br>Alasan: {_lead_e(r.get('rejection_reason'))}</td><td>{needs_text}<br><b>Total: Rp {_lead_e(r.get('total_needs_amount'))}</b></td><td>{media}</td></tr>")
+            body.append(f"<tr class='lead-report-data-row'><td>{r['survey_id']}</td><td>{_lead_e(r.get('verified_at'))}</td><td>{_lead_e(r.get('verifier_name'))}<br><small>{_lead_e(r.get('verifier_id'))}</small></td><td>{_lead_e(r.get('verifier_region') or r.get('village'))}</td><td><b>{_lead_e(r.get('applicant_name'))}</b><br>{_lead_e(r.get('business_name'))}</td><td><b>{_lead_e(r.get('decision'))}</b><br>Kondisi: {_lead_e(r.get('business_condition'))}<br>Aktivitas: {_lead_e(r.get('actual_business_activity'))}<br>Kesesuaian: {_lead_e(r.get('data_match'))}<br>Catatan: {_lead_e(r.get('verification_notes'))}<br>Alasan: {_lead_e(r.get('rejection_reason'))}</td><td>{needs_text}<br><b>Total: Rp {_lead_e(r.get('total_needs_amount'))}</b></td></tr><tr class='lead-report-media-row'><td colspan='7'>{media}</td></tr>")
     if not body:
-        body = ["<tr><td colspan='8' style='text-align:center'>Tidak ada data yang sesuai filter.</td></tr>"]
+        body = ["<tr><td colspan='7' style='text-align:center'>Tidak ada data yang sesuai filter.</td></tr>"]
     if verification:
         heading = "Laporan Verifikasi DPS"
-        headers = "<th>ID Survei</th><th>Waktu Verifikasi</th><th>Verifikator</th><th>Wilayah DPS</th><th>Pemohon / Usaha</th><th>Hasil Pemeriksaan</th><th>Rincian Kebutuhan</th><th>Foto Verifikasi</th>"
+        headers = "<th>ID Survei</th><th>Waktu Verifikasi</th><th>Verifikator</th><th>Wilayah DPS</th><th>Pemohon / Usaha</th><th>Hasil Pemeriksaan</th><th>Rincian Kebutuhan</th>"
     else:
         heading = "Laporan Survei DPSS"
-        headers = "<th>ID</th><th>Waktu Survei</th><th>Petugas DPSS</th><th>Desa</th><th>Pemohon</th><th>Informasi Usaha</th><th>Modal / Omzet Awal</th><th>KTP / Foto / Video Survei</th>"
-    return f"<section class='panel'><h2>{heading} · {len(rows)} data</h2><div class='tablewrap'><table><thead><tr>{headers}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
+        headers = "<th>ID</th><th>Waktu Survei</th><th>Petugas DPSS</th><th>Desa</th><th>Pemohon</th><th>Informasi Usaha</th><th>Modal / Omzet Awal</th>"
+    return f"<section class='panel lead-report-panel'><h2>{heading} · {len(rows)} data</h2><div class='tablewrap lead-report-tablewrap'><table class='lead-report-table'><thead><tr>{headers}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>"
 
 
 @app.get("/pimpinan/survei", response_class=HTMLResponse)
