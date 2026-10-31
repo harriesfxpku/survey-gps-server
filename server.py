@@ -2398,7 +2398,7 @@ def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depe
 
 
 @app.get("/admin/data-personel", response_class=HTMLResponse)
-def admin_data_personel(q: str = "", username: str = Depends(verify_admin)):
+def admin_data_personel(request: Request, q: str = "", username: str = Depends(verify_admin)):
     rows = _officer_profile_rows(q.strip())
     body = []
     for r in rows:
