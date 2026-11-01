@@ -64,6 +64,43 @@ app.add_middleware(
 )
 
 
+# Dependensi autentikasi admin harus didefinisikan sebelum route yang memakainya.
+admin_security = HTTPBasic()
+
+
+def verify_admin(
+    credentials: HTTPBasicCredentials = Depends(admin_security),
+):
+    admin_username = os.environ.get("ADMIN_USERNAME", "")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    if not admin_username or not admin_password:
+        raise HTTPException(
+            status_code=503,
+            detail="Login admin belum dikonfigurasi di server."
+        )
+
+    username_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        admin_username.encode("utf-8"),
+    )
+
+    password_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        admin_password.encode("utf-8"),
+    )
+
+    if not (username_ok and password_ok):
+        raise HTTPException(
+            status_code=401,
+            detail="Username atau kata sandi salah.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return credentials.username
+
+
+
 # Tema global Theme 2 untuk seluruh halaman HTML, termasuk halaman submenu.
 # CSS disisipkan setelah CSS halaman masing-masing agar tampilan konsisten tanpa
 # mengubah endpoint, query database, formulir, maupun alur kerja yang sudah ada.
@@ -1939,41 +1976,6 @@ def delete_survey_api(
 # =========================================================
 # DASHBOARD WEB ADMIN - DILINDUNGI LOGIN
 # =========================================================
-
-admin_security = HTTPBasic()
-
-
-def verify_admin(
-    credentials: HTTPBasicCredentials = Depends(admin_security),
-):
-    admin_username = os.environ.get("ADMIN_USERNAME", "")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "")
-
-    if not admin_username or not admin_password:
-        raise HTTPException(
-            status_code=503,
-            detail="Login admin belum dikonfigurasi di server."
-        )
-
-    username_ok = secrets.compare_digest(
-        credentials.username.encode("utf-8"),
-        admin_username.encode("utf-8"),
-    )
-
-    password_ok = secrets.compare_digest(
-        credentials.password.encode("utf-8"),
-        admin_password.encode("utf-8"),
-    )
-
-    if not (username_ok and password_ok):
-        raise HTTPException(
-            status_code=401,
-            detail="Username atau kata sandi salah.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    return credentials.username
-
 
 def create_supabase_signed_url(object_path: str, expires_in: int = 3600, bucket: str = "survey-media") -> str | None:
     """Buat URL sementara untuk menampilkan file dari bucket privat."""
