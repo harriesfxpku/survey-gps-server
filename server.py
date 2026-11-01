@@ -5,7 +5,7 @@ import secrets
 import hashlib
 import re
 import unicodedata
-from fastapi import UploadFile, File, Form
+from fastapi import UploadFile, File, Form, Cookie
 
 import psycopg
 import uvicorn
@@ -475,8 +475,20 @@ def initialize_database():
         # Konfigurasi desa dan penugasan petugas, ditambahkan tanpa menghapus data lama.
         connection.execute("""CREATE TABLE IF NOT EXISTS villages (
             id BIGSERIAL PRIMARY KEY, village_name VARCHAR(150) UNIQUE NOT NULL,
-            district VARCHAR(150) NOT NULL DEFAULT 'Tambang', bucket_name VARCHAR(100) NOT NULL UNIQUE,
+            province_name VARCHAR(150) NOT NULL DEFAULT '',
+            regency_name VARCHAR(150) NOT NULL DEFAULT '',
+            district VARCHAR(150) NOT NULL DEFAULT 'Tambang',
+            bucket_name VARCHAR(100) NOT NULL UNIQUE,
             active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        # Master desa lama tetap dipakai. Kolom provinsi/kabupaten ditambahkan
+        # bertahap agar pemetaan desa baru tidak hanya bergantung pada nama desa.
+        connection.execute("ALTER TABLE villages ADD COLUMN IF NOT EXISTS province_name VARCHAR(150) NOT NULL DEFAULT ''")
+        connection.execute("ALTER TABLE villages ADD COLUMN IF NOT EXISTS regency_name VARCHAR(150) NOT NULL DEFAULT ''")
+        # Nama desa boleh sama di wilayah berbeda. Identitas unik mengikuti hierarki wilayah,
+        # sedangkan bucket_name tetap unik secara global untuk penyimpanan media.
+        connection.execute("ALTER TABLE villages DROP CONSTRAINT IF EXISTS villages_village_name_key")
+        connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS villages_region_name_uidx
+            ON villages (LOWER(province_name), LOWER(regency_name), LOWER(district), LOWER(village_name))""")
         connection.execute("""CREATE TABLE IF NOT EXISTS officer_villages (
             officer_id BIGINT NOT NULL REFERENCES officers(id) ON DELETE CASCADE,
             village_id BIGINT NOT NULL REFERENCES villages(id) ON DELETE CASCADE,
@@ -618,8 +630,7 @@ def initialize_database():
         connection.execute("""INSERT INTO villages (village_name, district, bucket_name) VALUES
             ('Aur Sati', 'Tambang', 'Aur-Sati-Kec-Tambang'),
             ('Balam Jaya', 'Tambang', 'Balam-Jaya-Kec-Tambang')
-            ON CONFLICT (village_name)
-            DO UPDATE SET district = EXCLUDED.district""")
+            ON CONFLICT DO NOTHING""")
         connection.execute("ALTER TABLE organization_member_registrations ADD COLUMN IF NOT EXISTS member_code VARCHAR(80) NOT NULL DEFAULT ''")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_org_reg_member_code_unique ON organization_member_registrations(member_code) WHERE member_code <> ''")
         # Backfill ID untuk pendaftaran lama. ID login yang sudah dipakai dipertahankan agar akun aktif tidak berubah.
@@ -649,8 +660,20 @@ def get_village_bucket(connection, village_id):
 
 
 def ensure_dps_survey_access(connection, identity, survey_id):
-    # DPS (Kecamatan) dapat membuka survei dari desa di kecamatannya.
-    # Penugasan desa eksplisit tetap didukung untuk menjaga kompatibilitas.
+    # Cakupan akun baru yang sudah memuat hierarki wilayah harus disahkan admin.
+    # Akun DPS lama tanpa kolom cakupan tetap memakai mekanisme kompatibilitas region.
+    officer_scope = connection.execute("""SELECT scope_province,scope_regency,scope_district,scope_verified
+        FROM officers WHERE member_id=%s AND active=1""", (identity["member_id"],)).fetchone()
+    if officer_scope:
+        has_declared_scope = any((officer_scope.get(k) or "").strip()
+            for k in ("scope_province", "scope_regency", "scope_district"))
+        if has_declared_scope and officer_scope.get("scope_verified") not in (1, True):
+            raise HTTPException(status_code=403,
+                detail="Cakupan wilayah DPS belum disahkan admin. Verifikasi cakupan wilayah sebelum melakukan verifikasi survei.")
+
+    # DPS hanya dapat membuka survei dari desa di kecamatan yang ditetapkan.
+    # Pengecekan provinsi/kabupaten ikut diterapkan jika master desa sudah memiliki
+    # data hierarki tersebut; master desa lama yang masih kosong tetap kompatibel.
     row = connection.execute("""SELECT s.id
         FROM surveys s
         JOIN officers o ON o.member_id = %s AND o.active = 1
@@ -663,8 +686,14 @@ def ensure_dps_survey_access(connection, identity, survey_id):
             OR EXISTS (
                 SELECT 1 FROM villages v
                 WHERE v.active = 1
-                  AND lower(trim(regexp_replace(coalesce(v.district, ''), '^(kecamatan|kec\\.?)[[:space:]]+', '', 'i'))) =
-                      lower(trim(regexp_replace(regexp_replace(coalesce(o.region, ''), '^(kecamatan|kec\\.?)[[:space:]]+', '', 'i'), '[,;].*$', '')))
+                  AND lower(trim(regexp_replace(coalesce(v.district, ''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(regexp_replace(coalesce(NULLIF(o.scope_district,''), o.region, ''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'), '[,;].*$', '')))
+                  AND (coalesce(v.province_name,'')='' OR coalesce(o.scope_province,'')='' OR
+                      lower(trim(regexp_replace(v.province_name, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(o.scope_province, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))))
+                  AND (coalesce(v.regency_name,'')='' OR coalesce(o.scope_regency,'')='' OR
+                      lower(trim(regexp_replace(v.regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(o.scope_regency, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))))
                   AND (
                       v.id = s.village_id
                       OR lower(trim(regexp_replace(coalesce(v.village_name, ''), '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
@@ -758,12 +787,15 @@ def get_request_identity(
 
 def get_officer_identity(
     authorization: str | None = Header(default=None),
+    sidps_session: str | None = Cookie(default=None),
 ):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas.")
-    token = authorization[7:].strip()
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif sidps_session:
+        token = sidps_session.strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Token login tidak valid.")
+        raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas.")
     with get_db() as connection:
         row = connection.execute(
             """
@@ -955,8 +987,41 @@ def admin_set_officer_scope(
             "role": officer["role"], "scope": new_scope}
 
 
+@app.get("/admin/cakupan-wilayah/data")
+def admin_list_officer_scopes(username: str = Depends(verify_admin)):
+    """Data akun untuk halaman penetapan cakupan wilayah; hanya dapat dibaca admin."""
+    with get_db() as connection:
+        rows = connection.execute("""SELECT id,member_id,member_name,role,region,
+            scope_province,scope_regency,scope_district,scope_village_name,scope_verified,
+            scope_verified_by,scope_verified_at,active
+            FROM officers ORDER BY role,member_name""").fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/admin/cakupan-wilayah", response_class=HTMLResponse)
+def admin_officer_scope_dashboard(username: str = Depends(verify_admin)):
+    """Halaman admin untuk menetapkan cakupan tepercaya DPD/DPC/DPS/DPSS."""
+    html = r"""<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Penetapan Cakupan Wilayah | SIDPS 555</title><style>
+    *{box-sizing:border-box}body{margin:0;background:#16090c;color:#f7eee5;font:14px/1.5 system-ui,Arial,sans-serif}header{padding:20px;background:linear-gradient(110deg,#19080c,#500813 55%,#26090e);border-bottom:2px solid #e0ad35}main{max-width:1250px;margin:auto;padding:20px}.note,.scope-card{background:#26191b;border:1px solid #5b3939;border-radius:12px;padding:16px;margin:12px 0}.note{border-left:4px solid #e0ad35}.scope-card h3{margin:0 0 4px;color:#f1cb72}.muted{color:#c1b2aa}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}label{display:block;color:#e8cc8b;font-weight:700;margin:8px 0 4px}input{width:100%;padding:10px;border-radius:8px;border:1px solid #624449;background:#180e11;color:#fff}button,.btn{display:inline-block;background:linear-gradient(110deg,#f0c85e,#bd821b);color:#24130a;border:0;border-radius:8px;padding:10px 14px;font-weight:800;text-decoration:none;cursor:pointer;margin-top:12px}.status{padding:9px 12px;border-radius:8px;margin:10px 0;display:none;white-space:pre-wrap}.status.show{display:block}.ok{background:#17452d;color:#c9f4d9}.err{background:#65202a;color:#ffe0e0}.badge{display:inline-block;padding:3px 8px;border-radius:20px;background:#604316;color:#ffdf8a;font-size:12px}.badge.ok{background:#17452d;color:#c9f4d9}@media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){main{padding:12px}.grid{grid-template-columns:1fr}}
+    </style></head><body><header><h1>Penetapan Cakupan Wilayah Petugas</h1><div>Admin: __USERNAME__</div></header><main>
+    <p><a class="btn" href="/admin/dashboard">Kembali ke Dashboard</a></p>
+    <div class="note"><b>Penting:</b> Wilayah yang diketik anggota saat pendaftaran bukan kewenangan otomatis. Admin menetapkan cakupan resmi berdasarkan SK atau dokumen organisasi. DPS memerlukan Provinsi, Kabupaten/Kota, dan Kecamatan. DPD, DPC, serta DPSS mengikuti tingkatan masing-masing.</div>
+    <div id="message" class="status"></div><div id="list">Memuat daftar akun...</div></main><script>
+    const $=id=>document.getElementById(id);function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+    async function req(url,options={}){const r=await fetch(url,Object.assign({credentials:'same-origin'},options));let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw Error(d.detail||'Permintaan gagal ('+r.status+')');return d}
+    function message(t,ok){$('message').textContent=t;$('message').className='status show '+(ok?'ok':'err')}
+    function card(o){const verified=Number(o.scope_verified)===1;return `<section class="scope-card"><h3>${esc(o.member_name)} <span class="muted">· ${esc(o.role)}</span></h3><div class="muted">ID: ${esc(o.member_id)} · Status akun: ${Number(o.active)===1?'Aktif':'Nonaktif'} · ${verified?'<span class="badge ok">Cakupan disahkan</span>':'<span class="badge">Belum disahkan</span>'}</div><form data-id="${o.id}"><div class="grid"><div><label>Provinsi</label><input name="province" maxlength="150" value="${esc(o.scope_province)}"></div><div><label>Kabupaten/Kota</label><input name="regency" maxlength="150" value="${esc(o.scope_regency)}"></div><div><label>Kecamatan</label><input name="district" maxlength="150" value="${esc(o.scope_district)}"></div><div><label>Desa/Kelurahan</label><input name="village" maxlength="150" value="${esc(o.scope_village_name)}"></div></div><button type="submit">Simpan dan Sahkan Cakupan</button></form></section>`}
+    async function load(){try{const rows=await req('/admin/cakupan-wilayah/data');$('list').innerHTML=rows.length?rows.map(card).join(''):'<div class="note">Belum ada akun petugas.</div>'}catch(e){$('list').textContent='Gagal memuat akun: '+e.message;message(e.message,false)}}
+    $('list').addEventListener('submit',async e=>{const f=e.target.closest('form[data-id]');if(!f)return;e.preventDefault();const fd=new FormData(f),payload=Object.fromEntries(fd.entries());const b=f.querySelector('button');b.disabled=true;try{const d=await req('/admin/akun-petugas/'+f.dataset.id+'/cakupan-wilayah',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});message(d.message+' Petugas perlu login ulang.',true);await load()}catch(err){message(err.message,false)}finally{b.disabled=false}});load();
+    </script></body></html>"""
+    return HTMLResponse(html.replace("__USERNAME__", escape(username)))
+
+
 class VillageCreate(BaseModel):
     village_name: str = Field(min_length=2, max_length=150)
+    province_name: str = Field(default="", max_length=150)
+    regency_name: str = Field(default="", max_length=150)
     district: str = Field(default="Tambang", min_length=2, max_length=150)
     bucket_name: str | None = Field(default=None, max_length=100)
 
@@ -971,7 +1036,7 @@ def _storage_slug(value: str) -> str:
 def list_villages(_: bool = Depends(verify_api_key)):
     with get_db() as connection:
         rows = connection.execute(
-            "SELECT id, village_name, district, bucket_name, active, created_at FROM villages ORDER BY district, village_name"
+            "SELECT id, village_name, province_name, regency_name, district, bucket_name, active, created_at FROM villages ORDER BY province_name, regency_name, district, village_name"
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -980,6 +1045,8 @@ def list_villages(_: bool = Depends(verify_api_key)):
 @app.post("/admin/data-desa", tags=["Data Wilayah"], summary="Tambah data desa dan kecamatan")
 def create_village(payload: VillageCreate, _: bool = Depends(verify_api_key)):
     village_name = payload.village_name.strip()
+    province_name = payload.province_name.strip()
+    regency_name = payload.regency_name.strip()
     district = payload.district.strip()
     bucket_name = (payload.bucket_name or _storage_slug(village_name)).strip()
     if not village_name or not district or not bucket_name:
@@ -989,14 +1056,90 @@ def create_village(payload: VillageCreate, _: bool = Depends(verify_api_key)):
     try:
         with get_db() as connection:
             row = connection.execute(
-                """INSERT INTO villages (village_name, district, bucket_name)
-                   VALUES (%s, %s, %s)
-                   RETURNING id, village_name, district, bucket_name, active, created_at""",
-                (village_name, district, bucket_name),
+                """INSERT INTO villages (village_name, province_name, regency_name, district, bucket_name)
+                   VALUES (%s, %s, %s, %s, %s)
+                   RETURNING id, village_name, province_name, regency_name, district, bucket_name, active, created_at""",
+                (village_name, province_name, regency_name, district, bucket_name),
             ).fetchone()
     except psycopg.errors.UniqueViolation as exc:
         raise HTTPException(status_code=409, detail="Nama desa atau nama bucket sudah terdaftar.") from exc
     return {"message": "Desa berhasil didaftarkan. Pastikan bucket dengan nama tersebut sudah dibuat sebagai PRIVATE di Supabase Storage.", "village": dict(row)}
+
+
+@app.get("/admin/master-data-wilayah", response_class=HTMLResponse)
+def admin_master_data_wilayah(username: str = Depends(verify_admin)):
+    """Master data desa resmi untuk pencocokan wilayah pendaftaran dan penugasan DPSS."""
+    html = r"""<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Master Data Wilayah | SIDPS 555</title><style>
+    *{box-sizing:border-box}body{margin:0;background:#16090c;color:#f7eee5;font:14px/1.5 system-ui,Arial,sans-serif}header{padding:20px;background:linear-gradient(110deg,#19080c,#500813 55%,#26090e);border-bottom:2px solid #e0ad35}main{max-width:1250px;margin:auto;padding:20px}.panel,.note{background:#26191b;border:1px solid #5b3939;border-radius:12px;padding:16px;margin:12px 0}.note{border-left:4px solid #e0ad35}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}label{display:block;color:#e8cc8b;font-weight:700;margin:8px 0 4px}input{width:100%;padding:10px;border-radius:8px;border:1px solid #624449;background:#180e11;color:#fff}button,.btn{display:inline-block;background:linear-gradient(110deg,#f0c85e,#bd821b);color:#24130a;border:0;border-radius:8px;padding:10px 14px;font-weight:800;text-decoration:none;cursor:pointer;margin:5px 5px 5px 0}.btn.secondary,button.secondary{background:#43252b;color:#f7eee5;border:1px solid #79515a}button:disabled{opacity:.5;cursor:wait}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:850px}th,td{padding:10px;border-bottom:1px solid #503337;text-align:left;vertical-align:top}th{color:#e7c46e;background:#301b20}.muted{color:#c1b2aa}.status{padding:9px 12px;border-radius:8px;margin:10px 0;display:none;white-space:pre-wrap}.status.show{display:block}.ok{background:#17452d;color:#c9f4d9}.err{background:#65202a;color:#ffe0e0}.badge{padding:3px 8px;border-radius:20px;background:#17452d;color:#c9f4d9;font-size:12px}.badge.off{background:#604316;color:#ffdf8a}@media(max-width:760px){main{padding:12px}.grid{grid-template-columns:1fr}}
+    </style></head><body><header><h1 style="margin:0;color:#f1cb72">Master Data Wilayah</h1><div>Administrasi wilayah resmi SIDPS 555 · Admin: __USERNAME__</div></header><main>
+    <p><a class="btn secondary" href="/admin/dashboard">Kembali ke Dashboard</a> <a class="btn secondary" href="/admin/cakupan-wilayah">Penetapan Cakupan Petugas</a></p>
+    <div class="note"><b>Aturan data:</b> masukkan wilayah sesuai dokumen organisasi. Nama desa yang sama dapat digunakan di kabupaten/kecamatan berbeda. Nama bucket dibuat otomatis dan tetap unik untuk penyimpanan privat. Data ini menjadi referensi pencocokan, bukan bukti pengesahan wilayah anggota.</div>
+    <section class="panel"><h2 style="margin-top:0;color:#f1cb72">Tambah Desa/Kelurahan</h2><form id="addForm"><div class="grid">
+    <div><label>Provinsi</label><input name="province_name" required maxlength="150"></div><div><label>Kabupaten/Kota</label><input name="regency_name" required maxlength="150"></div><div><label>Kecamatan</label><input name="district" required maxlength="150"></div><div><label>Desa/Kelurahan</label><input name="village_name" required maxlength="150"></div>
+    </div><button type="submit">Simpan Data Wilayah</button></form><div id="message" class="status"></div></section>
+    <section class="panel"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between"><h2 style="margin:0;color:#f1cb72">Daftar Master Wilayah</h2><input id="q" placeholder="Cari provinsi, kabupaten, kecamatan, desa" style="max-width:380px"></div><p class="muted" id="count">Memuat data...</p><div class="tablewrap"><table><thead><tr><th>Provinsi</th><th>Kabupaten/Kota</th><th>Kecamatan</th><th>Desa/Kelurahan</th><th>Bucket</th><th>Status</th><th>Aksi</th></tr></thead><tbody id="rows"><tr><td colspan="7">Memuat...</td></tr></tbody></table></div></section>
+    </main><script>
+    const $=id=>document.getElementById(id);let allRows=[];function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+    async function req(url,options={}){const r=await fetch(url,Object.assign({credentials:'same-origin'},options));let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw Error(d.detail||'Permintaan gagal ('+r.status+')');return d}
+    function msg(t,ok){$('message').textContent=t;$('message').className='status show '+(ok?'ok':'err')}
+    function render(){const q=$('q').value.trim().toLocaleLowerCase('id');const rows=allRows.filter(x=>[x.province_name,x.regency_name,x.district,x.village_name].join(' ').toLocaleLowerCase('id').includes(q));$('count').textContent='Menampilkan '+rows.length+' dari '+allRows.length+' data wilayah';$('rows').innerHTML=rows.length?rows.map(x=>`<tr><td>${esc(x.province_name)}</td><td>${esc(x.regency_name)}</td><td>${esc(x.district)}</td><td><b>${esc(x.village_name)}</b></td><td>${esc(x.bucket_name)}</td><td>${Number(x.active)===1?'<span class="badge">Aktif</span>':'<span class="badge off">Nonaktif</span>'}</td><td><button class="secondary" data-toggle="${x.id}" data-active="${Number(x.active)===1?0:1}">${Number(x.active)===1?'Nonaktifkan':'Aktifkan'}</button></td></tr>`).join(''):'<tr><td colspan="7">Belum ada data yang cocok.</td></tr>'}
+    async function load(){try{allRows=await req('/admin/master-data-wilayah/data');render()}catch(e){$('rows').innerHTML='<tr><td colspan="7">Gagal memuat: '+esc(e.message)+'</td></tr>';msg(e.message,false)}}
+    $('addForm').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const payload=Object.fromEntries(new FormData(e.target).entries());const d=await req('/admin/master-data-wilayah',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});msg(d.message,true);e.target.reset();await load()}catch(err){msg(err.message,false)}finally{b.disabled=false}});
+    $('rows').addEventListener('click',async e=>{const b=e.target.closest('button[data-toggle]');if(!b)return;b.disabled=true;try{const d=await req('/admin/master-data-wilayah/'+b.dataset.toggle+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:Number(b.dataset.active)})});msg(d.message,true);await load()}catch(err){msg(err.message,false)}finally{b.disabled=false}});$('q').addEventListener('input',render);load();
+    </script></body></html>"""
+    return HTMLResponse(html.replace("__USERNAME__", escape(username)))
+
+
+@app.get("/admin/master-data-wilayah/data")
+def admin_master_data_wilayah_data(_: str = Depends(verify_admin)):
+    with get_db() as connection:
+        rows = connection.execute("""SELECT id,village_name,province_name,regency_name,district,bucket_name,active,created_at
+            FROM villages ORDER BY province_name,regency_name,district,village_name""").fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/admin/master-data-wilayah")
+def admin_create_master_village(payload: VillageCreate, username: str = Depends(verify_admin)):
+    province = payload.province_name.strip()
+    regency = payload.regency_name.strip()
+    district = payload.district.strip()
+    village = payload.village_name.strip()
+    if not all((province, regency, district, village)):
+        raise HTTPException(status_code=422, detail="Provinsi, Kabupaten/Kota, Kecamatan, dan Desa/Kelurahan wajib diisi.")
+    # Bucket unik dan stabil per hierarki wilayah, termasuk bila nama desa sama.
+    scope_key = "|".join((province.casefold(), regency.casefold(), district.casefold(), village.casefold()))
+    bucket_base = _storage_slug("-".join((province,regency,district,village)))[:88]
+    bucket = f"{bucket_base}-{hashlib.sha1(scope_key.encode('utf-8')).hexdigest()[:10]}"
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", bucket):
+        raise HTTPException(status_code=422, detail="Nama bucket otomatis tidak valid.")
+    with get_db() as connection:
+        duplicate = connection.execute("""SELECT id FROM villages WHERE
+            LOWER(province_name)=LOWER(%s) AND LOWER(regency_name)=LOWER(%s)
+            AND LOWER(district)=LOWER(%s) AND LOWER(village_name)=LOWER(%s)""",
+            (province,regency,district,village)).fetchone()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Desa/Kelurahan dengan hierarki wilayah tersebut sudah terdaftar.")
+        try:
+            row = connection.execute("""INSERT INTO villages(village_name,province_name,regency_name,district,bucket_name)
+                VALUES(%s,%s,%s,%s,%s) RETURNING id,village_name,province_name,regency_name,district,bucket_name,active""",
+                (village,province,regency,district,bucket)).fetchone()
+        except psycopg.errors.UniqueViolation as exc:
+            raise HTTPException(status_code=409, detail="Nama wilayah atau bucket mengalami benturan. Periksa kembali master wilayah.") from exc
+    return {"message":"Master wilayah berhasil ditambahkan. Buat bucket dengan nama tersebut sebagai PRIVATE di Supabase Storage sebelum menggunakannya untuk media.","village":dict(row),"created_by":username}
+
+
+class VillageStatusUpdate(BaseModel):
+    active: int = Field(ge=0, le=1)
+
+
+@app.post("/admin/master-data-wilayah/{village_id}/status")
+def admin_set_master_village_status(village_id: int, payload: VillageStatusUpdate, username: str = Depends(verify_admin)):
+    with get_db() as connection:
+        row = connection.execute("UPDATE villages SET active=%s WHERE id=%s RETURNING id,village_name,active",(payload.active,village_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Data desa tidak ditemukan.")
+    return {"message":f"Status {row['village_name']} berhasil diubah menjadi {'aktif' if payload.active else 'nonaktif'}.","village":dict(row),"updated_by":username}
 
 
 class OfficerVillageAssignment(BaseModel):
@@ -1019,6 +1162,12 @@ def assign_officer_villages(
         officer = connection.execute("SELECT id, role FROM officers WHERE member_id=%s AND active=1", (normalized_id,)).fetchone()
         if not officer:
             raise HTTPException(status_code=404, detail="Akun petugas aktif tidak ditemukan.")
+        ambiguous = connection.execute("""SELECT LOWER(village_name) AS village_key, COUNT(*) AS total
+            FROM villages WHERE active=1 AND LOWER(village_name)=ANY(%s)
+            GROUP BY LOWER(village_name) HAVING COUNT(*)>1""", ([v.lower() for v in requested],)).fetchall()
+        if ambiguous:
+            names = [row["village_key"] for row in ambiguous]
+            raise HTTPException(status_code=409, detail="Nama desa tidak unik: " + ", ".join(names) + ". Penugasan perlu menggunakan ID desa agar wilayah tidak tertukar.")
         villages = connection.execute("SELECT id, village_name FROM villages WHERE active=1 AND LOWER(village_name)=ANY(%s)", ([v.lower() for v in requested],)).fetchall()
         found = {v["village_name"].lower() for v in villages}
         missing = [v for v in requested if v.lower() not in found]
@@ -1028,6 +1177,38 @@ def assign_officer_villages(
         for village in villages:
             connection.execute("INSERT INTO officer_villages (officer_id, village_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (officer["id"], village["id"]))
     return {"message": "Penugasan desa berhasil diperbarui.", "member_id": normalized_id, "villages": [v["village_name"] for v in villages]}
+
+
+class OfficerVillageIdAssignment(BaseModel):
+    village_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+@app.post("/admin/akun-petugas/{member_id}/penugasan-desa-id", tags=["Pengelolaan Akun"], summary="Atur desa tugas berdasarkan ID master wilayah")
+def assign_officer_villages_by_id(
+    member_id: str,
+    payload: OfficerVillageIdAssignment,
+    _: bool = Depends(verify_api_key),
+):
+    """Penugasan berdasarkan ID, aman untuk nama desa yang sama di wilayah berbeda."""
+    normalized_id = member_id.strip().upper()
+    requested_ids = list(dict.fromkeys(payload.village_ids))
+    with get_db() as connection:
+        officer = connection.execute("SELECT id,role FROM officers WHERE member_id=%s AND active=1", (normalized_id,)).fetchone()
+        if not officer:
+            raise HTTPException(status_code=404, detail="Akun petugas aktif tidak ditemukan.")
+        if officer["role"] != "DPSS":
+            raise HTTPException(status_code=422, detail="Penugasan desa khusus untuk akun DPSS.")
+        villages = connection.execute("""SELECT id,village_name,province_name,regency_name,district
+            FROM villages WHERE active=1 AND id=ANY(%s) ORDER BY province_name,regency_name,district,village_name""", (requested_ids,)).fetchall()
+        found_ids = {int(row["id"]) for row in villages}
+        missing = [str(value) for value in requested_ids if value not in found_ids]
+        if missing:
+            raise HTTPException(status_code=400, detail="ID desa tidak ditemukan atau nonaktif: " + ", ".join(missing))
+        connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer["id"],))
+        for village in villages:
+            connection.execute("INSERT INTO officer_villages(officer_id,village_id) VALUES(%s,%s) ON CONFLICT DO NOTHING", (officer["id"],village["id"]))
+        connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer["id"],))
+    return {"message":"Penugasan desa berhasil diperbarui. Petugas harus login kembali.","member_id":normalized_id,"villages":[dict(row) for row in villages]}
 
 
 @app.post("/admin/officers/{member_id}/deactivate", include_in_schema=False)
@@ -1361,21 +1542,28 @@ def create_survey(
         survey_id = row["id"]
         village_name = survey.village.strip()
         village_row = None
-        if village_name:
-            village_row = connection.execute(
-                "SELECT id, village_name FROM villages WHERE LOWER(TRIM(village_name)) = LOWER(%s) AND active = 1",
-                (village_name,),
-            ).fetchone()
-        if identity["auth_type"] == "officer":
+        if village_name and identity["auth_type"] == "officer":
+            # Untuk DPSS, cocokkan nama desa di antara desa yang memang ditugaskan
+            # kepada akun ini. Ini menghindari salah pilih bila nama desa berulang.
+            assigned_rows = connection.execute("""SELECT v.id,v.village_name FROM villages v
+                JOIN officer_villages ov ON ov.village_id=v.id
+                JOIN officers o ON o.id=ov.officer_id
+                WHERE o.member_id=%s AND o.active=1 AND v.active=1
+                  AND LOWER(TRIM(v.village_name))=LOWER(%s)""", (member_id,village_name)).fetchall()
+            if len(assigned_rows) > 1:
+                raise HTTPException(status_code=409, detail="Ada lebih dari satu desa tugas dengan nama yang sama. Aplikasi perlu mengirim ID desa agar lokasi tidak tertukar.")
+            village_row = assigned_rows[0] if assigned_rows else None
             if village_row is None:
-                raise HTTPException(status_code=400, detail="Pilih desa yang terdaftar: Aur Sati atau Balam Jaya.")
-            assigned = connection.execute("""SELECT 1 FROM officer_villages ov JOIN officers o ON o.id=ov.officer_id
-                WHERE o.member_id=%s AND o.active=1 AND ov.village_id=%s""", (member_id, village_row["id"])).fetchone()
-            if not assigned:
-                raise HTTPException(status_code=403, detail="Akun DPSS belum ditugaskan ke desa survei ini.")
+                raise HTTPException(status_code=403, detail="Desa tersebut belum terdaftar atau belum ditugaskan kepada akun DPSS ini.")
             connection.execute("UPDATE surveys SET village_id=%s, village=%s WHERE id=%s", (village_row["id"], village_row["village_name"], survey_id))
-        elif village_row:
-            connection.execute("UPDATE surveys SET village_id=%s, village=%s WHERE id=%s", (village_row["id"], village_row["village_name"], survey_id))
+        elif village_name:
+            matching_rows = connection.execute("""SELECT id,village_name FROM villages
+                WHERE LOWER(TRIM(village_name))=LOWER(%s) AND active=1 ORDER BY id""", (village_name,)).fetchall()
+            if len(matching_rows) > 1:
+                raise HTTPException(status_code=409, detail="Nama desa ditemukan di beberapa wilayah. Data survei harus memilih desa berdasarkan ID wilayah.")
+            village_row = matching_rows[0] if matching_rows else None
+            if village_row:
+                connection.execute("UPDATE surveys SET village_id=%s, village=%s WHERE id=%s", (village_row["id"], village_row["village_name"], survey_id))
 
     return {
         "message": "Data survei berhasil disimpan",
@@ -1443,7 +1631,7 @@ def require_dps(identity: dict = Depends(get_officer_identity)):
 def _normalize_region_name(value: str | None) -> str:
     """Normalisasi label wilayah untuk perbandingan, bukan untuk menetapkan otoritas."""
     value = unicodedata.normalize("NFKC", (value or "")).strip().casefold()
-    value = re.sub(r"^(kecamatan|kec\.?|kabupaten|kab\.?|kota|desa|kelurahan)\s+", "", value)
+    value = re.sub(r"^(kecamatan|kec[.]?|kabupaten|kab\.?|kota|desa|kelurahan)\s+", "", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip(" ,.;")
 
@@ -1523,6 +1711,388 @@ def dps_review_member_registration(
             WHERE id=%s""", (payload.status, payload.note.strip(), area_status,
                 identity["member_id"], payload.note.strip(), registration_id))
     return {"message": "Pemeriksaan pendaftaran berhasil disimpan.", "registration_id": registration_id, "status": payload.status, "area_verification_status": area_status}
+
+
+@app.get("/dps/login", response_class=HTMLResponse)
+def dps_browser_login_page():
+    return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login Petugas DPS</title><style>
+    body{margin:0;background:#f4f0eb;font:15px system-ui;color:#302729;display:grid;min-height:100vh;place-items:center}.box{width:min(420px,calc(100% - 32px));background:white;padding:28px;border-radius:15px;box-shadow:0 8px 30px #31090e18;border-top:5px solid #d8b15a}h1{color:#5b1018;margin:0 0 8px}p{color:#776b67}label{display:block;margin:15px 0 6px;font-weight:650}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d5cbc5;border-radius:8px;font:inherit}button{margin-top:20px;width:100%;padding:12px;background:#5b1018;color:white;border:0;border-radius:8px;font-weight:700;font:inherit;cursor:pointer}
+    </style></head><body><form class='box' method='post' action='/dps/login'><h1>Login Petugas DPS</h1><p>Masuk untuk memeriksa pendaftaran anggota sesuai wilayah tugas.</p><label>ID Member</label><input name='member_id' required autocomplete='username'><label>Kata sandi</label><input name='password' type='password' required autocomplete='current-password'><button type='submit'>Masuk</button></form></body></html>""")
+
+
+@app.post("/dps/login", response_class=HTMLResponse)
+def dps_browser_login(member_id: str = Form(...), password: str = Form(...)):
+    result = officer_login(OfficerLogin(member_id=member_id, password=password))
+    if result.get("role") != "DPS":
+        with get_db() as connection:
+            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(result["access_token"]),))
+        raise HTTPException(status_code=403, detail="Dashboard verifikasi pendaftaran ini khusus akun DPS.")
+    response = RedirectResponse(url="/dps/dashboard/pendaftaran-anggota", status_code=303)
+    response.set_cookie("sidps_session", result["access_token"], max_age=43200,
+                        httponly=True, secure=True, samesite="lax", path="/")
+    return response
+
+
+@app.post("/dps/logout")
+def dps_browser_logout(sidps_session: str | None = Cookie(default=None)):
+    if sidps_session:
+        with get_db() as connection:
+            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+    response = RedirectResponse(url="/dps/login", status_code=303)
+    response.delete_cookie("sidps_session", path="/")
+    return response
+
+
+
+# =========================================================
+# DASHBOARD MONITORING DPC DAN DPD (READ ONLY)
+# =========================================================
+
+def _require_verified_monitor_scope(role: str, identity: dict):
+    if identity.get("role") != role:
+        raise HTTPException(status_code=403, detail=f"Fitur ini khusus akun {role}.")
+    if identity.get("scope_verified") not in (1, True):
+        raise HTTPException(status_code=403, detail="Cakupan wilayah akun belum disahkan admin/pimpinan.")
+    province = _normalize_region_name(identity.get("scope_province"))
+    regency = _normalize_region_name(identity.get("scope_regency"))
+    district = _normalize_region_name(identity.get("scope_district"))
+    if not province:
+        raise HTTPException(status_code=403, detail="Cakupan Provinsi belum lengkap.")
+    if role == "DPC" and not regency:
+        raise HTTPException(status_code=403, detail="Cakupan Kabupaten/Kota belum lengkap.")
+    if role == "DPD" and (regency or district):
+        raise HTTPException(status_code=403, detail="Akun DPD harus memiliki cakupan satu Provinsi, bukan cakupan kabupaten/kecamatan.")
+    if role == "DPC" and district:
+        raise HTTPException(status_code=403, detail="Akun DPC harus memiliki cakupan satu Kabupaten/Kota, bukan kecamatan.")
+    return identity
+
+
+def require_verified_dpc_scope(identity: dict = Depends(get_officer_identity)):
+    return _require_verified_monitor_scope("DPC", identity)
+
+
+def require_verified_dpd_scope(identity: dict = Depends(get_officer_identity)):
+    return _require_verified_monitor_scope("DPD", identity)
+
+
+def _monitoring_summary(role: str, identity: dict):
+    province = _normalize_region_name(identity.get("scope_province"))
+    regency = _normalize_region_name(identity.get("scope_regency"))
+    def sql_norm(column: str) -> str:
+        return (
+            "lower(trim(regexp_replace(regexp_replace(coalesce(r." + column + ",''), "
+            "'^(kecamatan|kec\\.?|kabupaten|kab\\.?|kota|desa|kelurahan)[[:space:]]+', '', 'i'), "
+            "'[[:space:]]+', ' ', 'g')))"
+        )
+
+    if role == "DPD":
+        where_sql = f"{sql_norm('province_name')}=%s"
+        params = (province,)
+        group_column = "regency_name"
+        group_label = "Kabupaten/Kota"
+    else:
+        where_sql = f"{sql_norm('province_name')}=%s AND {sql_norm('regency_name')}=%s"
+        params = (province, regency)
+        group_column = "district_name"
+        group_label = "Kecamatan"
+
+    with get_db() as connection:
+        totals = connection.execute(f"""
+            SELECT COUNT(*) AS registered,
+                   COUNT(*) FILTER (WHERE status='approved') AS verified,
+                   COUNT(*) FILTER (WHERE status='pending') AS pending,
+                   COUNT(*) FILTER (WHERE status='revision') AS revision,
+                   COUNT(*) FILTER (WHERE status='rejected') AS rejected
+            FROM organization_member_registrations r
+            WHERE {where_sql}
+        """, params).fetchone()
+        groups = connection.execute(f"""
+            SELECT COALESCE(NULLIF(trim(r.{group_column}),''),'(Wilayah belum diisi)') AS area_name,
+                   COUNT(*) AS registered,
+                   COUNT(*) FILTER (WHERE r.status='approved') AS verified,
+                   COUNT(*) FILTER (WHERE r.status='pending') AS pending,
+                   COUNT(*) FILTER (WHERE r.status='revision') AS revision,
+                   COUNT(*) FILTER (WHERE r.status='rejected') AS rejected
+            FROM organization_member_registrations r
+            WHERE {where_sql}
+            GROUP BY 1
+            ORDER BY 1
+        """, params).fetchall()
+        target = connection.execute("""
+            SELECT target_count FROM organization_targets
+            WHERE target_name='anggota_terverifikasi_nasional' AND active=1
+        """).fetchone()
+        national = connection.execute("""
+            SELECT COUNT(*) AS verified
+            FROM organization_member_registrations
+            WHERE status='approved'
+        """).fetchone()
+
+    total = dict(totals or {})
+    target_count = int(target["target_count"]) if target else 8000
+    national_verified = int(national["verified"] or 0) if national else 0
+    total["registered"] = int(total.get("registered") or 0)
+    total["verified"] = int(total.get("verified") or 0)
+    total["pending"] = int(total.get("pending") or 0)
+    total["revision"] = int(total.get("revision") or 0)
+    total["rejected"] = int(total.get("rejected") or 0)
+    return {
+        "role": role,
+        "scope": {
+            "province": identity.get("scope_province", ""),
+            "regency": identity.get("scope_regency", "") if role == "DPC" else "",
+        },
+        "group_label": group_label,
+        "summary": total,
+        "groups": [dict(row) for row in groups],
+        "national_target": {
+            "target": target_count,
+            "verified": national_verified,
+            "percentage": round(min(100, national_verified * 100 / target_count), 2) if target_count else 0,
+        },
+        "read_only": True,
+    }
+
+
+@app.get("/dpc/monitoring/data")
+def dpc_monitoring_data(identity: dict = Depends(require_verified_dpc_scope)):
+    return _monitoring_summary("DPC", identity)
+
+
+@app.get("/dpd/monitoring/data")
+def dpd_monitoring_data(identity: dict = Depends(require_verified_dpd_scope)):
+    return _monitoring_summary("DPD", identity)
+
+
+def _monitoring_dashboard_html(role: str, identity: dict):
+    data = _monitoring_summary(role, identity)
+    scope = data["scope"]
+    scope_text = scope["province"]
+    if role == "DPC":
+        scope_text += " · " + scope["regency"]
+    summary = data["summary"]
+    target = data["national_target"]
+    group_rows = []
+    for row in data["groups"]:
+        pct = round((int(row["verified"] or 0) * 100 / int(row["registered"])) , 1) if int(row["registered"] or 0) else 0
+        group_rows.append(
+            "<tr><td>" + escape(str(row["area_name"])) + "</td>"
+            + "<td>" + str(int(row["registered"] or 0)) + "</td>"
+            + "<td><b>" + str(int(row["verified"] or 0)) + "</b></td>"
+            + "<td>" + str(int(row["pending"] or 0)) + "</td>"
+            + "<td>" + str(int(row["revision"] or 0)) + "</td>"
+            + "<td>" + str(int(row["rejected"] or 0)) + "</td>"
+            + f"<td>{pct:.1f}%</td></tr>"
+        )
+    rows_html = "".join(group_rows) or f"<tr><td colspan='7'>Belum ada data anggota pada cakupan {escape(data['group_label'].lower())} ini.</td></tr>"
+    title = "Monitoring DPC" if role == "DPC" else "Monitoring DPD"
+    logout_path = "/dpc/logout" if role == "DPC" else "/dpd/logout"
+    html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>{title} | SIDPS 555</title><meta http-equiv='refresh' content='60'><style>
+    *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:14px/1.5 system-ui,Arial}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:white;padding:22px;border-bottom:3px solid #d8b15a}}main{{max-width:1150px;margin:auto;padding:20px}}.scope{{color:#f1d99c}}.grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0}}.card,.panel{{background:white;border:1px solid #e8ded8;border-radius:12px;padding:16px;box-shadow:0 4px 14px #31090e0b}}.card small{{color:#766b67}}.num{{font-size:27px;font-weight:800;color:#5b1018}}.panel{{margin:14px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:11px;border-bottom:1px solid #eee4dd;text-align:left}}th{{background:#f8f2e9;color:#5b1018}}.bar{{height:13px;background:#eee4dd;border-radius:20px;overflow:hidden}}.bar span{{display:block;height:100%;background:#b88a2e;width:{target['percentage']}%}}button{{border:0;background:#d8b15a;color:#31090e;padding:10px 15px;border-radius:8px;font-weight:800;cursor:pointer}}.top{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}}@media(max-width:800px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}main{{padding:12px}}}}
+    </style></head><body><header><div class='top'><div><h1 style='margin:0'>{title}</h1><div class='scope'>Cakupan resmi: {escape(scope_text)}</div><div>Monitoring anggota · Akses hanya-baca</div></div><form method='post' action='{logout_path}'><button type='submit'>Keluar</button></form></div></header><main>
+    <section class='grid'>
+      <div class='card'><small>Anggota terdaftar</small><div class='num'>{summary['registered']}</div></div>
+      <div class='card'><small>Terverifikasi</small><div class='num'>{summary['verified']}</div></div>
+      <div class='card'><small>Menunggu verifikasi</small><div class='num'>{summary['pending']}</div></div>
+      <div class='card'><small>Perlu perbaikan</small><div class='num'>{summary['revision']}</div></div>
+      <div class='card'><small>Ditolak</small><div class='num'>{summary['rejected']}</div></div>
+    </section>
+    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Target nasional 8.000 anggota terverifikasi</h2>
+      <div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><b>{target['verified']:,} terverifikasi</b><b>{target['target']:,} target · {target['percentage']}%</b></div>
+      <div class='bar' style='margin:10px 0'><span></span></div>
+      <small>Angka target merupakan rekap nasional agregat. Dashboard ini tidak menampilkan identitas anggota di luar cakupan wilayah.</small>
+    </section>
+    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Ekspor Data Anggota Terverifikasi</h2>
+      <p>Ekspor hanya memuat anggota berstatus disetujui dalam cakupan resmi akun ini.</p>
+      <a class='btn' href='/{role.lower()}/anggota/export/excel'>Unduh Excel</a>
+      <a class='btn' href='/{role.lower()}/anggota/export/pdf' target='_blank' rel='noopener'>Unduh PDF</a>
+    </section>
+    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Rekap per {escape(data['group_label'])}</h2>
+      <table><thead><tr><th>{escape(data['group_label'])}</th><th>Terdaftar</th><th>Terverifikasi</th><th>Menunggu</th><th>Perbaikan</th><th>Ditolak</th><th>Rasio verifikasi</th></tr></thead><tbody>{rows_html}</tbody></table>
+    </section>
+    <p style='color:#766b67'>Data diperbarui saat halaman dibuka. Dashboard DPC/DPD bersifat read-only dan tidak menyediakan tindakan verifikasi maupun perubahan data anggota.</p>
+    </main></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/dpc/login", response_class=HTMLResponse)
+def dpc_browser_login_page():
+    return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login DPC</title><style>body{margin:0;background:#f4f0eb;font:15px system-ui;color:#302729;display:grid;min-height:100vh;place-items:center}.box{width:min(420px,calc(100% - 32px));background:white;padding:28px;border-radius:15px;border-top:5px solid #d8b15a}h1{color:#5b1018}label{display:block;margin:15px 0 6px;font-weight:650}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d5cbc5;border-radius:8px;font:inherit}button{margin-top:20px;width:100%;padding:12px;background:#5b1018;color:white;border:0;border-radius:8px;font:inherit}</style></head><body><form class='box' method='post' action='/dpc/login'><h1>Login Monitoring DPC</h1><label>ID Member</label><input name='member_id' required><label>Kata sandi</label><input name='password' type='password' required><button>Masuk</button></form></body></html>""")
+
+
+@app.get("/dpd/login", response_class=HTMLResponse)
+def dpd_browser_login_page():
+    return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login DPD</title><style>body{margin:0;background:#f4f0eb;font:15px system-ui;color:#302729;display:grid;min-height:100vh;place-items:center}.box{width:min(420px,calc(100% - 32px));background:white;padding:28px;border-radius:15px;border-top:5px solid #d8b15a}h1{color:#5b1018}label{display:block;margin:15px 0 6px;font-weight:650}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d5cbc5;border-radius:8px;font:inherit}button{margin-top:20px;width:100%;padding:12px;background:#5b1018;color:white;border:0;border-radius:8px;font:inherit}</style></head><body><form class='box' method='post' action='/dpd/login'><h1>Login Monitoring DPD</h1><label>ID Member</label><input name='member_id' required><label>Kata sandi</label><input name='password' type='password' required><button>Masuk</button></form></body></html>""")
+
+
+def _browser_role_login(role: str, member_id: str, password: str):
+    result = officer_login(OfficerLogin(member_id=member_id, password=password))
+    if result.get("role") != role:
+        with get_db() as connection:
+            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(result["access_token"]),))
+        raise HTTPException(status_code=403, detail=f"Dashboard ini khusus akun {role}.")
+    login_path = f"/{role.lower()}/login"
+    dashboard_path = f"/{role.lower()}/dashboard"
+    response = RedirectResponse(url=dashboard_path, status_code=303)
+    response.set_cookie("sidps_session", result["access_token"], max_age=43200,
+                        httponly=True, secure=True, samesite="lax", path="/")
+    return response
+
+
+@app.post("/dpc/login", response_class=HTMLResponse)
+def dpc_browser_login(member_id: str = Form(...), password: str = Form(...)):
+    return _browser_role_login("DPC", member_id, password)
+
+
+@app.post("/dpd/login", response_class=HTMLResponse)
+def dpd_browser_login(member_id: str = Form(...), password: str = Form(...)):
+    return _browser_role_login("DPD", member_id, password)
+
+
+@app.post("/dpc/logout")
+def dpc_browser_logout(sidps_session: str | None = Cookie(default=None)):
+    if sidps_session:
+        with get_db() as connection:
+            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+    response = RedirectResponse(url="/dpc/login", status_code=303)
+    response.delete_cookie("sidps_session", path="/")
+    return response
+
+
+@app.post("/dpd/logout")
+def dpd_browser_logout(sidps_session: str | None = Cookie(default=None)):
+    if sidps_session:
+        with get_db() as connection:
+            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+    response = RedirectResponse(url="/dpd/login", status_code=303)
+    response.delete_cookie("sidps_session", path="/")
+    return response
+
+
+@app.get("/dpc/dashboard", response_class=HTMLResponse)
+def dpc_monitoring_dashboard(identity: dict = Depends(require_verified_dpc_scope)):
+    return _monitoring_dashboard_html("DPC", identity)
+
+
+@app.get("/dpd/dashboard", response_class=HTMLResponse)
+def dpd_monitoring_dashboard(identity: dict = Depends(require_verified_dpd_scope)):
+    return _monitoring_dashboard_html("DPD", identity)
+
+
+@app.get("/dps/dashboard/pendaftaran-anggota", response_class=HTMLResponse)
+def dps_member_registration_dashboard(
+    status: str = "pending",
+    q: str = "",
+    identity: dict = Depends(require_verified_dps_scope),
+):
+    """Dashboard web DPS untuk memeriksa pendaftaran anggota dalam wilayah resminya."""
+    if status not in {"pending", "revision", "all"}:
+        status = "pending"
+    province = _normalize_region_name(identity["scope_province"])
+    regency = _normalize_region_name(identity["scope_regency"])
+    district = _normalize_region_name(identity["scope_district"])
+    scope_sql = _dps_registration_scope_sql()
+    query = q.strip()
+    with get_db() as connection:
+        rows = connection.execute(f"""SELECT r.id, r.registration_code, r.member_code,
+                r.full_name, r.nik, r.phone, r.org_level, r.org_position,
+                r.province_name, r.regency_name, r.district_name, r.village_name,
+                r.region, r.address, r.birth_place, r.birth_date,
+                r.status, r.area_verification_status, r.area_verification_note,
+                r.admin_note, r.profile_photo_path, r.ktp_path, r.created_at
+            FROM organization_member_registrations r
+            WHERE {scope_sql} AND r.org_level IN ('DPS','DPSS')
+              AND (%s='all' OR r.status=%s)
+              AND (%s='' OR r.full_name ILIKE %s OR r.nik ILIKE %s OR r.phone ILIKE %s OR r.registration_code ILIKE %s)
+            ORDER BY r.created_at ASC LIMIT 300""",
+            (province, regency, district, status, status, query,
+             f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%")).fetchall()
+
+    def esc(value):
+        return escape(str(value if value is not None else ""), quote=True)
+
+    cards = []
+    for row in rows:
+        r = dict(row)
+        profile_url = create_supabase_signed_url(r["profile_photo_path"], 1800, _officer_private_bucket()) if r.get("profile_photo_path") else None
+        ktp_url = create_supabase_signed_url(r["ktp_path"], 1800, _officer_private_bucket()) if r.get("ktp_path") else None
+        profile = (f"<a href='{esc(profile_url)}' target='_blank' rel='noopener'><img class='photo' src='{esc(profile_url)}' alt='Foto diri'></a>" if profile_url else "<div class='missing'>Foto diri belum tersedia</div>")
+        ktp = (f"<a href='{esc(ktp_url)}' target='_blank' rel='noopener'><img class='photo ktp' src='{esc(ktp_url)}' alt='Foto KTP'></a>" if ktp_url else "<div class='missing'>Foto KTP belum tersedia</div>")
+        wilayah = " · ".join(x for x in [r.get("province_name"), r.get("regency_name"), r.get("district_name"), r.get("village_name")] if x)
+        note = r.get("area_verification_note") or r.get("admin_note") or ""
+        action = "" if r["status"] not in ("pending", "revision") else f"""
+          <form class='decision' method='post' action='/dps/pendaftaran-anggota/{int(r['id'])}/keputusan'>
+            <label>Keputusan pemeriksaan</label>
+            <select name='new_status' required>
+              <option value='approved'>Disetujui</option>
+              <option value='revision'>Perlu perbaikan</option>
+              <option value='rejected'>Ditolak</option>
+            </select>
+            <label>Catatan pemeriksa</label>
+            <textarea name='note' rows='3' maxlength='2000' placeholder='Tuliskan alasan atau hal yang perlu diperbaiki'></textarea>
+            <button type='submit' onclick=\"return confirm('Simpan keputusan pemeriksaan ini?')\">Simpan Keputusan</button>
+          </form>"""
+        cards.append(f"""
+        <article class='card'>
+          <div class='cardtop'><div><span class='badge'>{esc(r['status'].upper())}</span> <span class='muted'>{esc(r.get('registration_code'))}</span>
+          <h2>{esc(r.get('full_name'))}</h2><p>{esc(r.get('org_level'))} · {esc(r.get('org_position'))}</p></div><div class='membercode'>ID Member<br><b>{esc(r.get('member_code') or 'Belum ditetapkan')}</b></div></div>
+          <div class='photos'>{profile}{ktp}</div>
+          <div class='details'>
+            <p><b>NIK:</b> {esc(r.get('nik'))} &nbsp; <b>Telepon:</b> {esc(r.get('phone'))}</p>
+            <p><b>Wilayah:</b> {esc(wilayah or r.get('region') or '-')}</p>
+            <p><b>Alamat:</b> {esc(r.get('address') or '-')}</p>
+            <p><b>Tempat/Tanggal lahir:</b> {esc(r.get('birth_place') or '-')} / {esc(r.get('birth_date') or '-')}</p>
+            <p><b>Catatan sebelumnya:</b> {esc(note or '-')}</p>
+          </div>{action}
+        </article>""")
+
+    count_label = f"{len(rows)} pendaftaran ditampilkan"
+    tabs = "".join(
+        f"<a class='tab {'active' if status == key else ''}' href='/dps/dashboard/pendaftaran-anggota?status={key}'>{label}</a>"
+        for key, label in [("pending", "Menunggu"), ("revision", "Perlu Perbaikan"), ("all", "Semua Status")]
+    )
+    body = "".join(cards) if cards else "<div class='empty'>Tidak ada pendaftaran yang cocok dengan filter ini.</div>"
+    return HTMLResponse(f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Anggota DPS</title>
+    <style>
+    *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:15px system-ui,Arial}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:24px max(18px,calc((100% - 1100px)/2));border-bottom:4px solid #d8b15a}}header h1{{margin:0 0 7px;font-size:24px}}header p{{margin:0;color:#f3dfb4}}main{{max-width:1100px;margin:24px auto;padding:0 16px}}.scope{{background:#fff8e9;border:1px solid #e6d4a9;border-radius:12px;padding:14px 16px;margin-bottom:18px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:18px 0}}.tabs{{display:flex;gap:7px;flex-wrap:wrap}}.tab{{padding:9px 13px;border-radius:8px;text-decoration:none;background:#e8dfd8;color:#5b1018;font-weight:650}}.tab.active{{background:#5b1018;color:white}}input{{padding:10px 12px;border:1px solid #cfc5bd;border-radius:8px;min-width:230px}}button{{border:0;background:#5b1018;color:white;padding:11px 16px;border-radius:8px;font-weight:700;cursor:pointer}}.count{{color:#6d5e5b;font-size:13px}}.card{{background:white;border-radius:14px;padding:20px;margin:14px 0;box-shadow:0 3px 15px #32101812;border:1px solid #eee5df}}.cardtop{{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}}h2{{margin:9px 0 3px;color:#5b1018}}.badge{{display:inline-block;background:#f4e7c8;color:#6b4b12;padding:5px 9px;border-radius:20px;font-size:11px;font-weight:800}}.muted{{color:#847773;font-size:12px}}.membercode{{text-align:right;color:#8a7771;font-size:12px}}.membercode b{{color:#5b1018;font-size:14px}}.photos{{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}}.photo{{width:150px;height:150px;object-fit:cover;border:1px solid #ddd;border-radius:10px;background:#fafafa}}.photo.ktp{{width:230px}}.missing{{width:150px;height:100px;border:1px dashed #cbbfb8;border-radius:10px;display:grid;place-items:center;color:#998b84;font-size:12px;text-align:center;padding:8px}}.details p{{margin:8px 0;line-height:1.5}}.decision{{border-top:1px solid #eee5df;margin-top:16px;padding-top:15px;display:grid;gap:8px;max-width:520px}}label{{font-weight:700;font-size:13px}}select,textarea{{font:inherit;padding:10px;border:1px solid #cfc5bd;border-radius:8px;background:white}}textarea{{resize:vertical}}.empty{{background:white;padding:35px;border-radius:12px;text-align:center;color:#786b66}}footer{{text-align:center;color:#938681;font-size:12px;padding:25px}}
+    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p><a href='/dps/anggota/export/excel' style='display:inline-block;background:#d8b15a;color:#31090e;padding:8px 11px;border-radius:7px;text-decoration:none;font-weight:700'>Ekspor Excel Anggota</a> <a href='/dps/anggota/export/pdf' target='_blank' rel='noopener' style='display:inline-block;background:#d8b15a;color:#31090e;padding:8px 11px;border-radius:7px;text-decoration:none;font-weight:700'>Ekspor PDF Anggota</a></p><p>Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi</p></div><form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
+    <section class='scope'><b>Cakupan tugas:</b> {esc(identity['scope_district'])}, {esc(identity['scope_regency'])}, {esc(identity['scope_province'])}<br><small>Daftar ini hanya memuat pendaftaran DPS dan DPSS di wilayah kewenangan akun Anda.</small></section>
+    <div class='toolbar'><nav class='tabs'>{tabs}</nav><form method='get' action='/dps/dashboard/pendaftaran-anggota'><input type='hidden' name='status' value='{esc(status)}'><input name='q' value='{esc(query)}' placeholder='Cari nama, NIK, telepon, kode'><button type='submit'>Cari</button></form></div>
+    <div class='count'>{esc(count_label)} · Maksimal 300 data per tampilan</div>{body}
+    </main><footer>SIDPS · Data anggota bersifat terbatas dan hanya untuk pemeriksaan sesuai kewenangan.</footer></body></html>""", headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
+
+
+@app.post("/dps/pendaftaran-anggota/{registration_id}/keputusan", response_class=HTMLResponse)
+def dps_submit_member_registration_decision(
+    registration_id: int,
+    new_status: str = Form(...),
+    note: str = Form(""),
+    identity: dict = Depends(require_verified_dps_scope),
+):
+    """Simpan keputusan dari formulir dashboard DPS dengan pemeriksaan cakupan di server."""
+    if new_status not in {"approved", "revision", "rejected"}:
+        raise HTTPException(status_code=422, detail="Keputusan pemeriksaan tidak valid.")
+    province = _normalize_region_name(identity["scope_province"])
+    regency = _normalize_region_name(identity["scope_regency"])
+    district = _normalize_region_name(identity["scope_district"])
+    scope_sql = _dps_registration_scope_sql()
+    area_status = {"approved": "verified", "revision": "needs_revision", "rejected": "rejected"}[new_status]
+    clean_note = note.strip()[:2000]
+    with get_db() as connection:
+        row = connection.execute(f"""SELECT id, status FROM organization_member_registrations r
+            WHERE r.id=%s AND {scope_sql} AND r.org_level IN ('DPS','DPSS') FOR UPDATE""",
+            (registration_id, province, regency, district)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan dalam wilayah kewenangan akun DPS ini.")
+        if row["status"] not in ("pending", "revision"):
+            raise HTTPException(status_code=409, detail="Pendaftaran ini sudah memiliki keputusan akhir.")
+        connection.execute("""UPDATE organization_member_registrations
+            SET status=%s, admin_note=%s, area_verification_status=%s,
+                area_verified_by=%s, area_verified_at=NOW(), area_verification_note=%s,
+                updated_at=NOW(), reviewed_at=NOW()
+            WHERE id=%s""", (new_status, clean_note, area_status, identity["member_id"], clean_note, registration_id))
+    return RedirectResponse(url=f"/dps/dashboard/pendaftaran-anggota?status={new_status}", status_code=303)
 
 
 @app.get("/dps/surveys")
@@ -2060,14 +2630,14 @@ def account_management_dashboard(credentials: HTTPBasicCredentials = Depends(adm
 <div class="tablewrap"><table><thead><tr><th>Anggota terverifikasi</th><th>Jabatan / Struktur</th><th>Wilayah</th><th>Akses aplikasi</th><th>Aksi</th></tr></thead><tbody id="membersBody"><tr><td colspan="5" class="empty">Memuat data anggota...</td></tr></tbody></table></div>
 <p class="subtle">Data identitas bersumber dari pendaftaran anggota yang berstatus Disetujui. Pemberian akses tidak mengubah status keanggotaan. Menonaktifkan akses tidak menghapus data anggota maupun riwayat survei.</p></section>
 </main>
-<dialog id="grantDialog"><form id="grantForm"><div class="modalhead"><h2 style="margin:0;font-size:19px">Berikan Akses Aplikasi</h2><div id="selectedName" class="subtle" style="color:#f3e6e6"></div></div><div class="modalbody"><input type="hidden" id="registrationId"><div class="field"><label>ID Member otomatis (juga menjadi ID Login)</label><div id="memberCode" style="padding:11px;border:1px solid #d4d0ca;border-radius:8px;background:#f8f4ec;font-weight:800;color:#5b1018">-</div></div><div class="field"><label for="initialPassword">Kata sandi awal yang dibuat admin</label><input id="initialPassword" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="Minimal 10 karakter"></div><p class="subtle">Peran DPS/DPSS dan wilayah tugas diambil otomatis dari data pendaftaran anggota yang telah disetujui.</p></div><div class="modalfoot"><button type="button" class="secondary" id="cancelGrant">Batal</button><button type="submit">Setujui & Berikan Akses</button></div></form></dialog>
+<dialog id="grantDialog"><form id="grantForm"><div class="modalhead"><h2 style="margin:0;font-size:19px">Berikan Akses Aplikasi</h2><div id="selectedName" class="subtle" style="color:#f3e6e6"></div></div><div class="modalbody"><input type="hidden" id="registrationId"><div class="field"><label>ID Member otomatis (juga menjadi ID Login)</label><div id="memberCode" style="padding:11px;border:1px solid #d4d0ca;border-radius:8px;background:#f8f4ec;font-weight:800;color:#5b1018">-</div></div><div class="field"><label for="initialPassword">Kata sandi awal yang dibuat admin</label><input id="initialPassword" type="password" required minlength="10" maxlength="200" autocomplete="new-password" placeholder="Minimal 10 karakter"></div><p class="subtle">Peran DPD/DPC/DPS/DPSS dan wilayah administrasi diambil dari pendaftaran yang disetujui. Penetapan cakupan resmi untuk akses monitoring/verifikasi tetap dilakukan admin secara terpisah.</p></div><div class="modalfoot"><button type="button" class="secondary" id="cancelGrant">Batal</button><button type="submit">Setujui & Berikan Akses</button></div></form></dialog>
 <script>
 (function(){const $=id=>document.getElementById(id);let members=[];
 function msg(text,ok=false){const e=$('status');e.textContent=text;e.className='status show '+(ok?'ok':'err')}
 async function api(path,options={}){let r;try{r=await fetch(path,Object.assign({credentials:'same-origin'},options))}catch(e){throw Error('Koneksi ke server gagal. Periksa internet lalu coba lagi.')}let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw Error(d.detail||d.message||('Permintaan gagal ('+r.status+').'));return d}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function state(m){if(!m.login_member_id)return '<span class="pill off">Belum diberi akses</span>';return Number(m.account_active)===1?'<span class="pill">Akses aktif</span>':'<span class="pill off">Akses nonaktif</span>'}
-function render(){const q=$('filter').value.trim().toLowerCase(),scope=$('scope').value;let rows=members.filter(m=>[m.full_name,m.nik,m.phone,m.org_position,m.org_level,m.region,m.village_name,m.member_code,m.login_member_id].join(' ').toLowerCase().includes(q));rows=rows.filter(m=>scope==='all'||(scope==='none'&&!m.login_member_id)||(scope==='active'&&m.login_member_id&&Number(m.account_active)===1)||(scope==='inactive'&&m.login_member_id&&Number(m.account_active)!==1));$('membersBody').innerHTML=rows.length?rows.map(m=>`<tr><td><b>${esc(m.full_name)}</b><br><span class="subtle">NIK: ${esc(m.nik)}</span><br><span class="subtle">HP: ${esc(m.phone)}</span></td><td>${esc(m.org_position)}<br><span class="subtle">${esc(m.org_level)}</span></td><td>${esc(m.region||'-')}${m.village_name?'<br><span class="subtle">Desa: '+esc(m.village_name)+'</span>':''}</td><td>${state(m)}<br><span class="subtle">ID Member: ${esc(m.member_code||'-')}</span>${m.login_member_id?'<br><span class="subtle">Akses dengan ID: '+esc(m.login_member_id)+'</span>':''}</td><td><div class="actions">${!m.login_member_id?`<button type="button" data-grant="${m.id}">Beri Akses</button>`:(Number(m.account_active)===1?`<button type="button" class="danger" data-disable="${m.id}">Cabut Akses</button>`:`<button type="button" data-enable="${m.id}">Aktifkan Akses</button>`)}</div></td></tr>`).join(''):'<tr><td colspan="5" class="empty">Tidak ada anggota yang cocok. Pastikan pendaftaran sudah berstatus Disetujui.</td></tr>'}
+function render(){const q=$('filter').value.trim().toLowerCase(),scope=$('scope').value;let rows=members.filter(m=>[m.full_name,m.nik,m.phone,m.org_position,m.org_level,m.region,m.province_name,m.regency_name,m.district_name,m.village_name,m.member_code,m.login_member_id].join(' ').toLowerCase().includes(q));rows=rows.filter(m=>scope==='all'||(scope==='none'&&!m.login_member_id)||(scope==='active'&&m.login_member_id&&Number(m.account_active)===1)||(scope==='inactive'&&m.login_member_id&&Number(m.account_active)!==1));$('membersBody').innerHTML=rows.length?rows.map(m=>{const wilayah=[m.province_name,m.regency_name,m.district_name,m.village_name||m.registered_village_name].filter(Boolean).join(' · ')||m.region||'-';return `<tr><td><b>${esc(m.full_name)}</b><br><span class="subtle">NIK: ${esc(m.nik)}</span><br><span class="subtle">HP: ${esc(m.phone)}</span></td><td>${esc(m.org_position)}<br><span class="subtle">${esc(m.org_level)}</span></td><td>${esc(wilayah)}</td><td>${state(m)}<br><span class="subtle">ID Member: ${esc(m.member_code||'-')}</span>${m.login_member_id?'<br><span class="subtle">Akses dengan ID: '+esc(m.login_member_id)+'</span>':''}</td><td><div class="actions">${!m.login_member_id?`<button type="button" data-grant="${m.id}">Beri Akses</button>`:(Number(m.account_active)===1?`<button type="button" class="danger" data-disable="${m.id}">Cabut Akses</button>`:`<button type="button" data-enable="${m.id}">Aktifkan Akses</button>`)}</div></td></tr>`}).join(''):'<tr><td colspan="5" class="empty">Tidak ada anggota yang cocok. Pastikan pendaftaran sudah berstatus Disetujui.</td></tr>'}
 async function load(){ $('membersBody').innerHTML='<tr><td colspan="5" class="empty">Memuat data anggota terverifikasi...</td></tr>';try{const d=await api('/admin/kelola-akun/data');members=Array.isArray(d)?d:[];render();msg('Data dimuat: '+members.length+' anggota terverifikasi.',true)}catch(e){msg(e.message);$('membersBody').innerHTML='<tr><td colspan="5" class="empty">Gagal memuat data.</td></tr>'}}
 $('refreshBtn').addEventListener('click',load);$('filter').addEventListener('input',render);$('scope').addEventListener('change',render);
 $('membersBody').addEventListener('click',async e=>{const g=e.target.closest('[data-grant]'),d=e.target.closest('[data-disable]'),a=e.target.closest('[data-enable]');if(g){const m=members.find(x=>String(x.id)===g.dataset.grant);if(!m)return;$('registrationId').value=m.id;$('selectedName').textContent=m.full_name+' · '+m.org_level+' · '+m.org_position;$('memberCode').textContent=m.member_code||'ID belum tersedia';$('initialPassword').value='';$('grantDialog').showModal();return}if(d){const m=members.find(x=>String(x.id)===d.dataset.disable);if(!m||!confirm('Cabut akses aplikasi untuk '+m.full_name+'? Data anggota dan riwayat survei tetap disimpan.'))return;d.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/nonaktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);d.disabled=false}return}if(a){const m=members.find(x=>String(x.id)===a.dataset.enable);if(!m||!confirm('Aktifkan kembali akses aplikasi untuk '+m.full_name+'?'))return;a.disabled=true;try{const r=await api('/admin/kelola-akun/'+m.id+'/aktifkan',{method:'POST'});msg(r.message,true);await load()}catch(err){msg(err.message);a.disabled=false}}});
@@ -2134,7 +2704,7 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
 @media(max-width:1200px){{.stats{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:800px){{.layout{{grid-template-columns:1fr;padding:14px}}.sidebar{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.sidebar .side-label{{display:none}}.sidebar a{{flex:0 0 auto}}}}@media(max-width:620px){{.hero{{padding:15px}}.brand img{{width:54px;height:54px}}.stats{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.stat{{padding:12px}}.stat strong{{font-size:23px}}.menu{{grid-template-columns:1fr}}.card{{padding:14px}}.layout{{padding:10px}}}}
 </style></head><body><main class='wrap'>
 <header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>555 · ADMIN CONTROL CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Pusat administrasi organisasi</p></div></div><div class='user'>Administrator: <b>{escape(username)}</b></div></header>
-<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Data Personel</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
+<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Data Personel</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin/cakupan-wilayah'>⌖ &nbsp; Cakupan Wilayah</a><a href='/admin/master-data-wilayah'>▦ &nbsp; Master Data Wilayah</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
 <h2 class='section-title'>Ringkasan Sistem</h2>
 <section class='stats'>
 <div class='stat'><span>Total Pendaftaran Anggota</span><strong>{stat('registrations_total')}</strong><small>Seluruh status</small></div>
@@ -2154,6 +2724,8 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
 <article class='card'><div class='icon'>🗂️</div><div><h3>Daftar Seluruh Anggota</h3><p>Lihat seluruh anggota DPS dan DPSS yang sudah disetujui, termasuk foto profil dan dokumen identitas.</p><a class='btn' href='/admin/data-anggota'>Buka Data Anggota</a></div></article>
 <article class='card'><div class='icon'>👥</div><div><h3>Data Personel Petugas</h3><p>Lihat dan kelola data profil petugas yang sudah memiliki akun aplikasi.</p><a class='btn' href='/admin/data-personel'>Buka Data Personel</a></div></article>
 <article class='card'><div class='icon'>🔐</div><div><h3>Kelola Akses Aplikasi</h3><p>Pilih anggota terverifikasi yang ditugaskan, berikan akses, aktifkan kembali, atau cabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses</a></div></article>
+<article class='card'><div class='icon'>🧭</div><div><h3>Penetapan Cakupan Wilayah</h3><p>Tetapkan wilayah resmi akun DPD, DPC, DPS, dan DPSS berdasarkan dokumen organisasi.</p><a class='btn' href='/admin/cakupan-wilayah'>Atur Cakupan Wilayah</a></div></article>
+<article class='card'><div class='icon'>🗺️</div><div><h3>Master Data Wilayah</h3><p>Kelola daftar resmi provinsi, kabupaten/kota, kecamatan, dan desa/kelurahan untuk pencocokan pendaftaran dan penugasan.</p><a class='btn' href='/admin/master-data-wilayah'>Kelola Data Wilayah</a></div></article>
 <article class='card'><div class='icon'>📍</div><div><h3>Data Survei dan Media</h3><p>Pantau data survei, lokasi GPS, dokumen, foto, video, dan hasil verifikasi yang tersimpan.</p><a class='btn' href='/admin'>Buka Data Survei</a></div></article>
 </section>
 <section class='panel'><h2>Pendaftaran yang Memerlukan Tindakan</h2><div class='tablewrap'><table><thead><tr><th>Nama / Kode</th><th>Struktur / Jabatan</th><th>Wilayah</th><th>Status</th></tr></thead><tbody>{recent_html}</tbody></table></div><p style='margin:14px 0 0'><a class='btn' href='/admin/pendaftaran-anggota?status=pending'>Periksa Pendaftaran</a></p></section>
@@ -2420,13 +2992,17 @@ def list_verified_members_for_app_access(username: str = Depends(verify_pimpinan
     with get_db() as connection:
         rows = connection.execute("""
             SELECT r.id, r.full_name, r.nik, r.phone, r.org_level, r.org_position,
-                   r.region, r.member_code, r.linked_member_id AS login_member_id,
-                   v.village_name, o.active AS account_active
+                   r.region, r.province_name, r.regency_name, r.district_name,
+                   r.village_name AS registered_village_name,
+                   r.member_code, r.linked_member_id AS login_member_id,
+                   COALESCE(NULLIF(v.village_name, ''), NULLIF(r.village_name, '')) AS village_name,
+                   o.active AS account_active
             FROM organization_member_registrations r
             LEFT JOIN villages v ON v.id = r.village_id
             LEFT JOIN officers o ON o.member_id = r.linked_member_id
             WHERE r.status = 'approved'
-            ORDER BY r.org_level, r.region, r.full_name
+            ORDER BY r.org_level, r.province_name, r.regency_name, r.district_name,
+                     COALESCE(v.village_name, r.village_name, ''), r.full_name
         """).fetchall()
     return [dict(row) for row in rows]
 
@@ -2446,8 +3022,45 @@ def grant_app_access_to_verified_member(
             raise HTTPException(status_code=404, detail="Anggota terverifikasi tidak ditemukan. Pastikan status pendaftarannya Disetujui.")
         if registration["org_level"] not in {"DPD", "DPC", "DPS", "DPSS"}:
             raise HTTPException(status_code=422, detail="Tingkat kepengurusan anggota tidak valid untuk akses aplikasi.")
-        if registration["org_level"] == "DPSS" and not registration["village_id"]:
-            raise HTTPException(status_code=422, detail="Data anggota DPSS belum memiliki desa penugasan. Perbaiki data pendaftarannya terlebih dahulu.")
+        # Form pendaftaran memakai nama wilayah bebas. Untuk DPSS, nama desa
+        # dipetakan ke master villages hanya setelah admin menyetujui pendaftaran.
+        # Master desa tetap diperlukan oleh modul survei lama (penugasan dan bucket
+        # media), tetapi pendaftar tidak perlu memilih village_id saat mendaftar.
+        assigned_village = None
+        if registration["org_level"] == "DPSS":
+            registered_village = (registration.get("village_name") or "").strip()
+            registered_district = (registration.get("district_name") or registration.get("region") or "").strip()
+            # Data lama yang sudah mempunyai village_id tetap didukung. Data baru
+            # dipetakan dari teks desa + kecamatan setelah lolos pemeriksaan admin.
+            if registration.get("village_id"):
+                assigned_village = connection.execute("""SELECT id,village_name,province_name,regency_name,district
+                    FROM villages WHERE id=%s AND active=1""", (registration["village_id"],)).fetchone()
+                if assigned_village and registered_village and _normalize_region_name(assigned_village["village_name"]) != _normalize_region_name(registered_village):
+                    assigned_village = None
+                if assigned_village and registered_district and _normalize_region_name(assigned_village["district"]) != _normalize_region_name(registered_district):
+                    assigned_village = None
+            elif registered_village and registered_district and registration.get("province_name") and registration.get("regency_name"):
+                # Pemetaan data baru harus cocok pada empat tingkat wilayah. Master lama
+                # yang provinsi/kabupatennya kosong tidak dipakai sebagai wildcard karena
+                # dapat menghubungkan anggota ke desa bernama sama di wilayah lain.
+                candidates = connection.execute("""SELECT id, village_name, province_name, regency_name, district
+                    FROM villages WHERE active=1
+                    AND lower(trim(regexp_replace(village_name, '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+                        lower(trim(regexp_replace(%s, '^(desa|kelurahan)[[:space:]]+', '', 'i')))
+                    AND lower(trim(regexp_replace(district, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
+                        lower(trim(regexp_replace(%s, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
+                    AND lower(trim(regexp_replace(province_name, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
+                        lower(trim(regexp_replace(%s, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i')))
+                    AND lower(trim(regexp_replace(regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
+                        lower(trim(regexp_replace(%s, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
+                    ORDER BY id""", (registered_village, registered_district,
+                        registration.get("province_name"), registration.get("regency_name"))).fetchall()
+                assigned_village = candidates[0] if len(candidates) == 1 else None
+            if not assigned_village:
+                raise HTTPException(status_code=409, detail=(
+                    "Wilayah desa DPSS belum cocok dengan Master Data Desa. "
+                    "Pastikan nama desa dan kecamatan sesuai, lalu daftarkan desa tersebut pada master wilayah."
+                ))
         member_id = (registration.get("linked_member_id") or registration.get("member_code") or "").strip().upper()
         if not member_id:
             raise HTTPException(status_code=409, detail="ID anggota belum terbentuk. Periksa data wilayah pendaftaran.")
@@ -2473,14 +3086,24 @@ def grant_app_access_to_verified_member(
         )
         if officer:
             connection.execute("""UPDATE officers SET member_name=%s,password_salt=%s,password_hash=%s,
-                role=%s,region=%s,active=1,updated_at=NOW() WHERE id=%s""",
-                (registration["full_name"], salt, hashed, registration["org_level"], registration["region"], officer["id"]))
+                role=%s,region=%s,active=1,
+                scope_province=%s,scope_regency=%s,scope_district=%s,scope_village_name=%s,
+                scope_verified=0,scope_verified_by='',scope_verified_at=NULL,updated_at=NOW()
+                WHERE id=%s""",
+                (registration["full_name"], salt, hashed, registration["org_level"], registration["region"],
+                 registration.get("province_name") or "", registration.get("regency_name") or "",
+                 registration.get("district_name") or registration.get("region") or "",
+                 (assigned_village["village_name"] if assigned_village else registration.get("village_name") or ""), officer["id"]))
             officer_id = officer["id"]
         else:
             officer_row = connection.execute("""INSERT INTO officers
-                (member_id,member_name,password_salt,password_hash,role,region,active)
-                VALUES (%s,%s,%s,%s,%s,%s,1) RETURNING id""",
-                (member_id, registration["full_name"], salt, hashed, registration["org_level"], registration["region"])).fetchone()
+                (member_id,member_name,password_salt,password_hash,role,region,active,
+                 scope_province,scope_regency,scope_district,scope_village_name,scope_verified)
+                VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,0) RETURNING id""",
+                (member_id, registration["full_name"], salt, hashed, registration["org_level"], registration["region"],
+                 registration.get("province_name") or "", registration.get("regency_name") or "",
+                 registration.get("district_name") or registration.get("region") or "",
+                 (assigned_village["village_name"] if assigned_village else registration.get("village_name") or ""))).fetchone()
             officer_id = officer_row["id"]
         connection.execute("""INSERT INTO officer_profiles
             (officer_id,nik,phone,address,birth_place,birth_date,profile_photo_path,ktp_path,updated_at)
@@ -2496,10 +3119,19 @@ def grant_app_access_to_verified_member(
         # Penugasan desa berasal dari data anggota terverifikasi. DPS tanpa desa khusus
         # mengikuti cakupan kecamatan melalui filter wilayah yang sudah ada.
         connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer_id,))
-        if registration["village_id"]:
-            connection.execute("INSERT INTO officer_villages (officer_id,village_id) VALUES (%s,%s) ON CONFLICT DO NOTHING", (officer_id, registration["village_id"]))
+        if registration["org_level"] == "DPSS" and assigned_village:
+            connection.execute("INSERT INTO officer_villages (officer_id,village_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (officer_id, assigned_village["id"]))
+            # village_id legacy diisi setelah pemetaan resmi ke master desa agar
+            # seluruh modul survei lama tetap memakai satu identitas desa yang sama.
+            connection.execute("UPDATE organization_member_registrations SET village_id=%s WHERE id=%s",
+                (assigned_village["id"], registration_id))
         connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer_id,))
-    return {"message": "Akses aplikasi berhasil diberikan berdasarkan data anggota terverifikasi.", "member_id": member_id, "role": registration["org_level"], "region": registration["region"]}
+    return {"message": "Akses aplikasi berhasil diberikan berdasarkan data anggota terverifikasi.",
+            "member_id": member_id, "role": registration["org_level"],
+            "region": registration["region"],
+            "village_assignment": (assigned_village["village_name"] if assigned_village else None),
+            "scope_status": "menunggu penetapan resmi admin"}
 
 
 @app.post("/admin/kelola-akun/{registration_id}/nonaktifkan")
@@ -2699,6 +3331,7 @@ def _officer_profile_rows(search_text=""):
     with get_db() as connection:
         return connection.execute("""
             SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+                   o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name, o.scope_verified,
                    COALESCE(p.nik,'') AS nik, COALESCE(p.phone,'') AS phone,
                    COALESCE(p.address,'') AS address,
                    COALESCE(p.birth_place,'') AS birth_place, p.birth_date,
@@ -2713,7 +3346,7 @@ def _officer_profile_rows(search_text=""):
                    OR COALESCE(p.phone,'') ILIKE %s OR COALESCE(o.region,'') ILIKE %s
                    OR COALESCE(v.village_name,'') ILIKE %s)
             GROUP BY o.id, p.officer_id
-            ORDER BY CASE WHEN o.role='DPS' THEN 0 ELSE 1 END, o.member_name
+            ORDER BY CASE o.role WHEN 'DPD' THEN 0 WHEN 'DPC' THEN 1 WHEN 'DPS' THEN 2 ELSE 3 END, o.member_name
         """, (search_text, f"%{search_text}%", f"%{search_text}%",
               f"%{search_text}%", f"%{search_text}%", f"%{search_text}%")).fetchall()
 
@@ -2735,7 +3368,7 @@ def admin_view_member_identity_document(registration_id: int, username: str = De
 def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depends(verify_admin)):
     """Direktori seluruh anggota yang telah disetujui, terpisah dari daftar akun aplikasi."""
     tingkat = tingkat.strip().upper()
-    if tingkat not in {"SEMUA", "DPS", "DPSS"}:
+    if tingkat not in {"SEMUA", "DPD", "DPC", "DPS", "DPSS"}:
         tingkat = "SEMUA"
     term = q.strip()
     with get_db() as connection:
@@ -2755,14 +3388,15 @@ def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depe
         photo_html=f"<img class='photo' src='{_lead_e(photo_url)}' alt='Foto {_lead_e(r['full_name'])}'>" if photo_url else "<div class='photo no-photo'>Foto belum tersedia</div>"
         doc_html=f"<a class='btn doc' href='/admin/data-anggota/{int(r['id'])}/dokumen-identitas' target='_blank' rel='noopener'>Lihat Dokumen Identitas</a>" if has_ktp else "<span class='muted'>Dokumen identitas belum tersedia</span>"
         birth_date=r['birth_date'].isoformat() if r['birth_date'] else '-'
-        village=r['village_name'] or ('Seluruh Desa' if r['org_level']=='DPS' else '-')
+        wilayah_parts = [r.get('province_name'), r.get('regency_name'), r.get('district_name'), r.get('village_name')]
+        wilayah_text = ' · '.join(str(x).strip() for x in wilayah_parts if str(x or '').strip()) or str(r.get('region') or '-')
         cards.append(f"""<article class='member-card'>{photo_html}<div class='member-data'><div class='topline'><div><h2>{_lead_e(r['full_name'])}</h2><span class='id'>ID Member: {_lead_e(r['member_code'] or '-')}</span></div><span class='level'>{_lead_e(r['org_level'])}</span></div>
-        <div class='details'><div><b>NIK</b><span>{_lead_e(r['nik'])}</span></div><div><b>Jenis Kelamin</b><span>{_lead_e(r['gender'] or '-')}</span></div><div><b>Tempat, Tanggal Lahir</b><span>{_lead_e(r['birth_place'] or '-')}, {_lead_e(birth_date)}</span></div><div><b>Nomor HP / WhatsApp</b><span>{_lead_e(r['phone'] or '-')}</span></div><div><b>Email</b><span>{_lead_e(r['email'] or '-')}</span></div><div><b>Jabatan</b><span>{_lead_e(r['org_position'])}</span></div><div><b>Wilayah</b><span>{_lead_e(r['region'] or '-')} · {_lead_e(village)}</span></div><div class='wide'><b>Alamat</b><span>{_lead_e(r['address'] or '-')}</span></div></div><div class='doc-row'>{doc_html}<a class='btn light' href='/admin/pendaftaran-anggota/{int(r['id'])}/edit'>Edit Data</a></div></div></article>""")
+        <div class='details'><div><b>NIK</b><span>{_lead_e(r['nik'])}</span></div><div><b>Jenis Kelamin</b><span>{_lead_e(r['gender'] or '-')}</span></div><div><b>Tempat, Tanggal Lahir</b><span>{_lead_e(r['birth_place'] or '-')}, {_lead_e(birth_date)}</span></div><div><b>Nomor HP / WhatsApp</b><span>{_lead_e(r['phone'] or '-')}</span></div><div><b>Email</b><span>{_lead_e(r['email'] or '-')}</span></div><div><b>Jabatan</b><span>{_lead_e(r['org_position'])}</span></div><div><b>Wilayah</b><span>{_lead_e(wilayah_text)}</span></div><div class='wide'><b>Alamat</b><span>{_lead_e(r['address'] or '-')}</span></div></div><div class='doc-row'>{doc_html}<a class='btn light' href='/admin/pendaftaran-anggota/{int(r['id'])}/edit'>Edit Data</a></div></div></article>""")
     cards_html=''.join(cards) or "<div class='empty'>Belum ada anggota terverifikasi yang sesuai dengan pencarian.</div>"
     html=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daftar Seluruh Anggota | Triple 555</title>
-    <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPS dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
+    <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPD, DPC, DPS, dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
     <nav class='nav'><a class='btn light' href='/admin/dashboard'>Dashboard Utama Admin</a><a class='btn light' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a><a class='btn light' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran</a></nav>
-    <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
+    <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPD' {'selected' if tingkat=='DPD' else ''}>DPD</option><option value='DPC' {'selected' if tingkat=='DPC' else ''}>DPC</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -2774,13 +3408,16 @@ def admin_data_personel(request: Request, q: str = "", username: str = Depends(v
         status = "Aktif" if r["active"] == 1 else "Nonaktif"
         photo = create_supabase_signed_url(r["profile_photo_path"], bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
         photo_html = f"<img class='avatar' src='{_lead_e(photo)}'>" if photo else "<div class='avatar blank'>Foto<br>belum ada</div>"
-        territory = r["villages"] or r["region"] or "-"
+        territory_parts = [r.get("scope_province"), r.get("scope_regency"), r.get("scope_district"), r.get("scope_village_name")]
+        territory = " · ".join(str(value).strip() for value in territory_parts if str(value or "").strip()) or r["villages"] or r["region"] or "-"
+        if r.get("scope_verified") not in (1, True):
+            territory += " · (cakupan belum disahkan)"
         body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(territory)}</td><td>{status}</td><td><div style='display:flex;gap:7px;flex-wrap:wrap'><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Data</a><form method='post' action='/admin/data-personel/{r['officer_id']}/hapus' onsubmit="return confirm('Hapus data personel {_lead_e(r['member_name'])} dengan ID {_lead_e(r['member_id'])}? Akun dan pendaftaran terkait akan dihapus. Data survei/verifikasi tidak akan dihapus.');"><button class='btn danger' type='submit'>Hapus</button></form></div></td></tr>""")
     if not body:
         body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
     deleted_notice = "<div style='background:#eaf7ef;color:#14532d;padding:11px 14px;border-radius:9px;margin:12px 0'>Data personel dan pendaftaran terkait berhasil dihapus.</div>" if request.query_params.get("deleted") == "1" else ""
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
-    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.danger{{background:#a32020}}form{{margin:0}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p>{deleted_notice}<section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
+    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.danger{{background:#a32020}}form{{margin:0}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPD, DPC, DPS, dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p>{deleted_notice}<section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -3685,6 +4322,245 @@ def pimpinan_verifikasi_pdf(request: Request, username: str = Depends(verify_pim
     return _lead_export_pdf(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.pdf","Laporan Verifikasi DPS")
 
 # =========================================================
+# MODUL EKSPOR DATA ANGGOTA (EXCEL/PDF) DENGAN PEMBATASAN WILAYAH
+# =========================================================
+
+def _member_export_scope(role: str, identity: dict):
+    """Bangun filter dari cakupan resmi akun, bukan dari isian pendaftar."""
+    def norm(column: str) -> str:
+        return f"lower(trim(regexp_replace(regexp_replace(coalesce(r.{column},''), '^(kecamatan|kec\\.?|kabupaten|kab\\.?|kota|desa|kelurahan|provinsi|prov\\.?)[[:space:]]+', '', 'i'), '[[:space:]]+', ' ', 'g')))"
+    if role == "DPS":
+        identity = _require_dps_export_scope(identity)
+        return (f"{norm('province_name')}=%s AND {norm('regency_name')}=%s AND {norm('district_name')}=%s",
+                (_normalize_region_name(identity["scope_province"]),
+                 _normalize_region_name(identity["scope_regency"]),
+                 _normalize_region_name(identity["scope_district"])))
+    if role == "DPC":
+        _require_verified_monitor_scope("DPC", identity)
+        return (f"{norm('province_name')}=%s AND {norm('regency_name')}=%s",
+                (_normalize_region_name(identity["scope_province"]), _normalize_region_name(identity["scope_regency"])))
+    if role == "DPD":
+        _require_verified_monitor_scope("DPD", identity)
+        return (f"{norm('province_name')}=%s", (_normalize_region_name(identity["scope_province"]),))
+    raise HTTPException(status_code=403, detail="Peran ini tidak memiliki kewenangan ekspor data anggota.")
+
+
+def _require_dps_export_scope(identity: dict):
+    if identity.get("role") != "DPS" or identity.get("scope_verified") not in (1, True):
+        raise HTTPException(status_code=403, detail="Ekspor hanya tersedia untuk akun DPS dengan cakupan wilayah yang disahkan.")
+    keys = ("scope_province", "scope_regency", "scope_district")
+    if not all(_normalize_region_name(identity.get(k)) for k in keys):
+        raise HTTPException(status_code=403, detail="Cakupan Provinsi, Kabupaten/Kota, dan Kecamatan belum lengkap.")
+    return identity
+
+
+def _member_export_rows(role: str, identity: dict):
+    where_sql, params = _member_export_scope(role, identity)
+    with get_db() as connection:
+        rows = connection.execute(f"""
+            SELECT r.id, r.full_name, r.org_position, r.org_level, r.phone,
+                   r.province_name, r.regency_name, r.district_name, r.village_name,
+                   r.profile_photo_path, r.ktp_path, r.member_code
+            FROM organization_member_registrations r
+            WHERE r.status='approved' AND ({where_sql})
+            ORDER BY r.province_name, r.regency_name, r.district_name, r.village_name, r.full_name
+        """, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _member_export_log(identity: dict, role: str, fmt: str, count: int):
+    with get_db() as connection:
+        connection.execute("""INSERT INTO organization_member_export_logs
+            (officer_id, actor_username, actor_role, export_format, scope_province,
+             scope_regency, scope_district, exported_count)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (identity.get("officer_id"), identity.get("member_id", ""), role, fmt,
+             identity.get("scope_province", ""), identity.get("scope_regency", ""),
+             identity.get("scope_district", ""), count))
+
+
+def _member_export_image_bytes(object_path: str):
+    if not object_path:
+        return None
+    signed = create_supabase_signed_url(object_path, expires_in=300, bucket=_officer_private_bucket())
+    if not signed:
+        return None
+    try:
+        req = urllib.request.Request(signed, headers={"User-Agent": "SIDPS-Private-Export/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = response.read(5 * 1024 * 1024 + 1)
+        if not data or len(data) > 5 * 1024 * 1024:
+            return None
+        return data
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"SIDPS member export: gagal mengambil media privat ({type(exc).__name__}).", flush=True)
+        return None
+
+
+def _member_export_area(row: dict) -> str:
+    return " · ".join(str(row.get(k) or "").strip() for k in
+        ("province_name", "regency_name", "district_name", "village_name") if str(row.get(k) or "").strip()) or "-"
+
+
+def _member_export_excel(rows: list[dict], filename: str):
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
+
+    output = io.BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data Anggota"
+    ws.append(["Foto Diri", "Foto KTP", "Informasi Identitas"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="5B1018")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 26
+    ws.column_dimensions["A"].width = 19
+    ws.column_dimensions["B"].width = 19
+    ws.column_dimensions["C"].width = 62
+    thin = Side(style="thin", color="D8C8B8")
+    for index, row in enumerate(rows, start=2):
+        ws.cell(index, 1, "")
+        ws.cell(index, 2, "")
+        identity_text = (
+            f"Nama: {row.get('full_name') or '-'}\n"
+            f"Jabatan: {row.get('org_position') or '-'}\n"
+            f"Tingkat: {row.get('org_level') or '-'}\n"
+            f"Wilayah: {_member_export_area(row)}\n"
+            f"No. Telepon: {row.get('phone') or '-'}"
+        )
+        c = ws.cell(index, 3, identity_text)
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+        for col in range(1, 4):
+            cell = ws.cell(index, col)
+            cell.border = Border(bottom=thin)
+            if col != 3:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[index].height = 66
+        for col, path_key in ((1, "profile_photo_path"), (2, "ktp_path")):
+            raw = _member_export_image_bytes(row.get(path_key) or "")
+            if raw:
+                try:
+                    image = XLImage(io.BytesIO(raw))
+                    image.width, image.height = 82, 58
+                    ws.add_image(image, f"{'A' if col == 1 else 'B'}{index}")
+                except Exception as exc:
+                    print(f"SIDPS Excel image skipped: {type(exc).__name__}", flush=True)
+                    ws.cell(index, col, "Foto tidak tersedia")
+            else:
+                ws.cell(index, col, "Foto tidak tersedia")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:C{max(1, len(rows)+1)}"
+    ws.sheet_view.showGridLines = False
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    wb.save(output)
+    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
+
+
+def _member_export_pdf(rows: list[dict], filename: str, title: str):
+    import io
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, LongTable, TableStyle, Paragraph, Spacer, Image as RLImage
+    from reportlab.lib.utils import ImageReader
+
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm,
+                            topMargin=13*mm, bottomMargin=13*mm, title=title)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="MemberCell", parent=styles["BodyText"], fontName="Helvetica", fontSize=8, leading=10, wordWrap="CJK"))
+    styles.add(ParagraphStyle(name="MemberHead", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=8, leading=9, textColor=colors.white, alignment=1))
+    story = [Paragraph(title, styles["Title"]), Spacer(1, 4*mm),
+             Paragraph(f"Jumlah anggota terverifikasi: {len(rows)}", styles["BodyText"]), Spacer(1, 4*mm)]
+    data = [[Paragraph("Foto Diri", styles["MemberHead"]), Paragraph("Foto KTP", styles["MemberHead"]), Paragraph("Informasi Identitas", styles["MemberHead"])]]
+    for row in rows:
+        cells = []
+        for path_key in ("profile_photo_path", "ktp_path"):
+            raw = _member_export_image_bytes(row.get(path_key) or "")
+            if raw:
+                try:
+                    img = RLImage(io.BytesIO(raw), width=25*mm, height=20*mm, kind="proportional")
+                    img.hAlign = "CENTER"
+                    cells.append(img)
+                except Exception:
+                    cells.append(Paragraph("Foto tidak tersedia", styles["MemberCell"]))
+            else:
+                cells.append(Paragraph("Foto tidak tersedia", styles["MemberCell"]))
+        info = (f"<b>Nama:</b> {escape(str(row.get('full_name') or '-'))}<br/>"
+                f"<b>Jabatan:</b> {escape(str(row.get('org_position') or '-'))}<br/>"
+                f"<b>Tingkat:</b> {escape(str(row.get('org_level') or '-'))}<br/>"
+                f"<b>Wilayah:</b> {escape(_member_export_area(row))}<br/>"
+                f"<b>No. Telepon:</b> {escape(str(row.get('phone') or '-'))}")
+        cells.append(Paragraph(info, styles["MemberCell"]))
+        data.append(cells)
+    table = LongTable(data, colWidths=[31*mm, 31*mm, 124*mm], repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#5B1018")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("GRID", (0,0), (-1,-1), 0.45, colors.HexColor("#C9B8A8")),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("ALIGN", (0,0), (1,-1), "CENTER"),
+        ("LEFTPADDING", (0,0), (-1,-1), 5), ("RIGHTPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+    ]))
+    story.append(table)
+    doc.build(story)
+    return Response(content=output.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
+
+
+def _member_export_response(role: str, identity: dict, fmt: str):
+    rows = _member_export_rows(role, identity)
+    scope_label = role.lower()
+    if fmt == "excel":
+        response = _member_export_excel(rows, f"data_anggota_{scope_label}.xlsx")
+    else:
+        response = _member_export_pdf(rows, f"data_anggota_{scope_label}.pdf", f"Data Anggota Terverifikasi {role}")
+    _member_export_log(identity, role, fmt, len(rows))
+    return response
+
+
+@app.get("/dps/anggota/export/excel")
+def dps_member_export_excel(identity: dict = Depends(require_verified_dps_scope)):
+    return _member_export_response("DPS", identity, "excel")
+
+
+@app.get("/dps/anggota/export/pdf")
+def dps_member_export_pdf(identity: dict = Depends(require_verified_dps_scope)):
+    return _member_export_response("DPS", identity, "pdf")
+
+
+@app.get("/dpc/anggota/export/excel")
+def dpc_member_export_excel(identity: dict = Depends(require_verified_dpc_scope)):
+    return _member_export_response("DPC", identity, "excel")
+
+
+@app.get("/dpc/anggota/export/pdf")
+def dpc_member_export_pdf(identity: dict = Depends(require_verified_dpc_scope)):
+    return _member_export_response("DPC", identity, "pdf")
+
+
+@app.get("/dpd/anggota/export/excel")
+def dpd_member_export_excel(identity: dict = Depends(require_verified_dpd_scope)):
+    return _member_export_response("DPD", identity, "excel")
+
+
+@app.get("/dpd/anggota/export/pdf")
+def dpd_member_export_pdf(identity: dict = Depends(require_verified_dpd_scope)):
+    return _member_export_response("DPD", identity, "pdf")
+
+# =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
 # =========================================================
 
@@ -3694,3 +4570,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
     )
+
+
