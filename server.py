@@ -1903,11 +1903,6 @@ def _monitoring_dashboard_html(role: str, identity: dict):
       <div class='bar' style='margin:10px 0'><span></span></div>
       <small>Angka target merupakan rekap nasional agregat. Dashboard ini tidak menampilkan identitas anggota di luar cakupan wilayah.</small>
     </section>
-    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Ekspor Data Anggota Terverifikasi</h2>
-      <p>Ekspor hanya memuat anggota berstatus disetujui dalam cakupan resmi akun ini.</p>
-      <a class='btn' href='/{role.lower()}/anggota/export/excel'>Unduh Excel</a>
-      <a class='btn' href='/{role.lower()}/anggota/export/pdf' target='_blank' rel='noopener'>Unduh PDF</a>
-    </section>
     <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Rekap per {escape(data['group_label'])}</h2>
       <table><thead><tr><th>{escape(data['group_label'])}</th><th>Terdaftar</th><th>Terverifikasi</th><th>Menunggu</th><th>Perbaikan</th><th>Ditolak</th><th>Rasio verifikasi</th></tr></thead><tbody>{rows_html}</tbody></table>
     </section>
@@ -2056,7 +2051,7 @@ def dps_member_registration_dashboard(
     return HTMLResponse(f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Anggota DPS</title>
     <style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:15px system-ui,Arial}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:24px max(18px,calc((100% - 1100px)/2));border-bottom:4px solid #d8b15a}}header h1{{margin:0 0 7px;font-size:24px}}header p{{margin:0;color:#f3dfb4}}main{{max-width:1100px;margin:24px auto;padding:0 16px}}.scope{{background:#fff8e9;border:1px solid #e6d4a9;border-radius:12px;padding:14px 16px;margin-bottom:18px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:18px 0}}.tabs{{display:flex;gap:7px;flex-wrap:wrap}}.tab{{padding:9px 13px;border-radius:8px;text-decoration:none;background:#e8dfd8;color:#5b1018;font-weight:650}}.tab.active{{background:#5b1018;color:white}}input{{padding:10px 12px;border:1px solid #cfc5bd;border-radius:8px;min-width:230px}}button{{border:0;background:#5b1018;color:white;padding:11px 16px;border-radius:8px;font-weight:700;cursor:pointer}}.count{{color:#6d5e5b;font-size:13px}}.card{{background:white;border-radius:14px;padding:20px;margin:14px 0;box-shadow:0 3px 15px #32101812;border:1px solid #eee5df}}.cardtop{{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}}h2{{margin:9px 0 3px;color:#5b1018}}.badge{{display:inline-block;background:#f4e7c8;color:#6b4b12;padding:5px 9px;border-radius:20px;font-size:11px;font-weight:800}}.muted{{color:#847773;font-size:12px}}.membercode{{text-align:right;color:#8a7771;font-size:12px}}.membercode b{{color:#5b1018;font-size:14px}}.photos{{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}}.photo{{width:150px;height:150px;object-fit:cover;border:1px solid #ddd;border-radius:10px;background:#fafafa}}.photo.ktp{{width:230px}}.missing{{width:150px;height:100px;border:1px dashed #cbbfb8;border-radius:10px;display:grid;place-items:center;color:#998b84;font-size:12px;text-align:center;padding:8px}}.details p{{margin:8px 0;line-height:1.5}}.decision{{border-top:1px solid #eee5df;margin-top:16px;padding-top:15px;display:grid;gap:8px;max-width:520px}}label{{font-weight:700;font-size:13px}}select,textarea{{font:inherit;padding:10px;border:1px solid #cfc5bd;border-radius:8px;background:white}}textarea{{resize:vertical}}.empty{{background:white;padding:35px;border-radius:12px;text-align:center;color:#786b66}}footer{{text-align:center;color:#938681;font-size:12px;padding:25px}}
-    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p><a href='/dps/anggota/export/excel' style='display:inline-block;background:#d8b15a;color:#31090e;padding:8px 11px;border-radius:7px;text-decoration:none;font-weight:700'>Ekspor Excel Anggota</a> <a href='/dps/anggota/export/pdf' target='_blank' rel='noopener' style='display:inline-block;background:#d8b15a;color:#31090e;padding:8px 11px;border-radius:7px;text-decoration:none;font-weight:700'>Ekspor PDF Anggota</a></p><p>Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi</p></div><form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
+    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p>Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi</p></div><form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
     <section class='scope'><b>Cakupan tugas:</b> {esc(identity['scope_district'])}, {esc(identity['scope_regency'])}, {esc(identity['scope_province'])}<br><small>Daftar ini hanya memuat pendaftaran DPS dan DPSS di wilayah kewenangan akun Anda.</small></section>
     <div class='toolbar'><nav class='tabs'>{tabs}</nav><form method='get' action='/dps/dashboard/pendaftaran-anggota'><input type='hidden' name='status' value='{esc(status)}'><input name='q' value='{esc(query)}' placeholder='Cari nama, NIK, telepon, kode'><button type='submit'>Cari</button></form></div>
     <div class='count'>{esc(count_label)} · Maksimal 300 data per tampilan</div>{body}
@@ -3331,7 +3326,6 @@ def _officer_profile_rows(search_text=""):
     with get_db() as connection:
         return connection.execute("""
             SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
-                   o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name, o.scope_verified,
                    COALESCE(p.nik,'') AS nik, COALESCE(p.phone,'') AS phone,
                    COALESCE(p.address,'') AS address,
                    COALESCE(p.birth_place,'') AS birth_place, p.birth_date,
@@ -3346,7 +3340,7 @@ def _officer_profile_rows(search_text=""):
                    OR COALESCE(p.phone,'') ILIKE %s OR COALESCE(o.region,'') ILIKE %s
                    OR COALESCE(v.village_name,'') ILIKE %s)
             GROUP BY o.id, p.officer_id
-            ORDER BY CASE o.role WHEN 'DPD' THEN 0 WHEN 'DPC' THEN 1 WHEN 'DPS' THEN 2 ELSE 3 END, o.member_name
+            ORDER BY CASE WHEN o.role='DPS' THEN 0 ELSE 1 END, o.member_name
         """, (search_text, f"%{search_text}%", f"%{search_text}%",
               f"%{search_text}%", f"%{search_text}%", f"%{search_text}%")).fetchall()
 
@@ -3368,7 +3362,7 @@ def admin_view_member_identity_document(registration_id: int, username: str = De
 def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depends(verify_admin)):
     """Direktori seluruh anggota yang telah disetujui, terpisah dari daftar akun aplikasi."""
     tingkat = tingkat.strip().upper()
-    if tingkat not in {"SEMUA", "DPD", "DPC", "DPS", "DPSS"}:
+    if tingkat not in {"SEMUA", "DPS", "DPSS"}:
         tingkat = "SEMUA"
     term = q.strip()
     with get_db() as connection:
@@ -3388,15 +3382,14 @@ def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depe
         photo_html=f"<img class='photo' src='{_lead_e(photo_url)}' alt='Foto {_lead_e(r['full_name'])}'>" if photo_url else "<div class='photo no-photo'>Foto belum tersedia</div>"
         doc_html=f"<a class='btn doc' href='/admin/data-anggota/{int(r['id'])}/dokumen-identitas' target='_blank' rel='noopener'>Lihat Dokumen Identitas</a>" if has_ktp else "<span class='muted'>Dokumen identitas belum tersedia</span>"
         birth_date=r['birth_date'].isoformat() if r['birth_date'] else '-'
-        wilayah_parts = [r.get('province_name'), r.get('regency_name'), r.get('district_name'), r.get('village_name')]
-        wilayah_text = ' · '.join(str(x).strip() for x in wilayah_parts if str(x or '').strip()) or str(r.get('region') or '-')
+        village=r['village_name'] or ('Seluruh Desa' if r['org_level']=='DPS' else '-')
         cards.append(f"""<article class='member-card'>{photo_html}<div class='member-data'><div class='topline'><div><h2>{_lead_e(r['full_name'])}</h2><span class='id'>ID Member: {_lead_e(r['member_code'] or '-')}</span></div><span class='level'>{_lead_e(r['org_level'])}</span></div>
-        <div class='details'><div><b>NIK</b><span>{_lead_e(r['nik'])}</span></div><div><b>Jenis Kelamin</b><span>{_lead_e(r['gender'] or '-')}</span></div><div><b>Tempat, Tanggal Lahir</b><span>{_lead_e(r['birth_place'] or '-')}, {_lead_e(birth_date)}</span></div><div><b>Nomor HP / WhatsApp</b><span>{_lead_e(r['phone'] or '-')}</span></div><div><b>Email</b><span>{_lead_e(r['email'] or '-')}</span></div><div><b>Jabatan</b><span>{_lead_e(r['org_position'])}</span></div><div><b>Wilayah</b><span>{_lead_e(wilayah_text)}</span></div><div class='wide'><b>Alamat</b><span>{_lead_e(r['address'] or '-')}</span></div></div><div class='doc-row'>{doc_html}<a class='btn light' href='/admin/pendaftaran-anggota/{int(r['id'])}/edit'>Edit Data</a></div></div></article>""")
+        <div class='details'><div><b>NIK</b><span>{_lead_e(r['nik'])}</span></div><div><b>Jenis Kelamin</b><span>{_lead_e(r['gender'] or '-')}</span></div><div><b>Tempat, Tanggal Lahir</b><span>{_lead_e(r['birth_place'] or '-')}, {_lead_e(birth_date)}</span></div><div><b>Nomor HP / WhatsApp</b><span>{_lead_e(r['phone'] or '-')}</span></div><div><b>Email</b><span>{_lead_e(r['email'] or '-')}</span></div><div><b>Jabatan</b><span>{_lead_e(r['org_position'])}</span></div><div><b>Wilayah</b><span>{_lead_e(r['region'] or '-')} · {_lead_e(village)}</span></div><div class='wide'><b>Alamat</b><span>{_lead_e(r['address'] or '-')}</span></div></div><div class='doc-row'>{doc_html}<a class='btn light' href='/admin/pendaftaran-anggota/{int(r['id'])}/edit'>Edit Data</a></div></div></article>""")
     cards_html=''.join(cards) or "<div class='empty'>Belum ada anggota terverifikasi yang sesuai dengan pencarian.</div>"
     html=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daftar Seluruh Anggota | Triple 555</title>
-    <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPD, DPC, DPS, dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
+    <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPS dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
     <nav class='nav'><a class='btn light' href='/admin/dashboard'>Dashboard Utama Admin</a><a class='btn light' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a><a class='btn light' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran</a></nav>
-    <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPD' {'selected' if tingkat=='DPD' else ''}>DPD</option><option value='DPC' {'selected' if tingkat=='DPC' else ''}>DPC</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
+    <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -3408,16 +3401,13 @@ def admin_data_personel(request: Request, q: str = "", username: str = Depends(v
         status = "Aktif" if r["active"] == 1 else "Nonaktif"
         photo = create_supabase_signed_url(r["profile_photo_path"], bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
         photo_html = f"<img class='avatar' src='{_lead_e(photo)}'>" if photo else "<div class='avatar blank'>Foto<br>belum ada</div>"
-        territory_parts = [r.get("scope_province"), r.get("scope_regency"), r.get("scope_district"), r.get("scope_village_name")]
-        territory = " · ".join(str(value).strip() for value in territory_parts if str(value or "").strip()) or r["villages"] or r["region"] or "-"
-        if r.get("scope_verified") not in (1, True):
-            territory += " · (cakupan belum disahkan)"
+        territory = r["villages"] or r["region"] or "-"
         body.append(f"""<tr><td>{photo_html}</td><td><b>{_lead_e(r['member_name'])}</b><br><small>{_lead_e(r['member_id'])} · {_lead_e(r['role'])}</small></td><td>{_lead_e(r['phone'] or '-')}</td><td>{_lead_e(territory)}</td><td>{status}</td><td><div style='display:flex;gap:7px;flex-wrap:wrap'><a class='btn' href='/admin/data-personel/{r['officer_id']}'>Isi / Edit Data</a><form method='post' action='/admin/data-personel/{r['officer_id']}/hapus' onsubmit="return confirm('Hapus data personel {_lead_e(r['member_name'])} dengan ID {_lead_e(r['member_id'])}? Akun dan pendaftaran terkait akan dihapus. Data survei/verifikasi tidak akan dihapus.');"><button class='btn danger' type='submit'>Hapus</button></form></div></td></tr>""")
     if not body:
         body = ["<tr><td colspan='6'>Belum ada akun petugas.</td></tr>"]
     deleted_notice = "<div style='background:#eaf7ef;color:#14532d;padding:11px 14px;border-radius:9px;margin:12px 0'>Data personel dan pendaftaran terkait berhasil dihapus.</div>" if request.query_params.get("deleted") == "1" else ""
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Data Personel DPS/DPSS</title>
-    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.danger{{background:#a32020}}form{{margin:0}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPD, DPC, DPS, dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p>{deleted_notice}<section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
+    <style>body{{font:14px system-ui;background:#f6f3ee;margin:0;color:#292323}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:22px}}main{{max-width:1200px;margin:auto;padding:20px}}.panel{{background:white;padding:18px;border-radius:13px;margin:12px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:800px}}td,th{{padding:10px;border-bottom:1px solid #e5e0d8;text-align:left}}th{{color:#5b1018;background:#f8f4ec}}input{{padding:10px;border:1px solid #ddd;border-radius:8px}}.btn,button{{background:#5b1018;color:white;border:0;border-radius:8px;padding:9px 12px;text-decoration:none;font-weight:bold;cursor:pointer}}.danger{{background:#a32020}}form{{margin:0}}.avatar{{width:58px;height:58px;border-radius:50%;object-fit:cover;background:#eee}}.blank{{display:flex;align-items:center;justify-content:center;text-align:center;font-size:10px;color:#777}}small{{color:#777}}</style></head><body><header><h1>Data Personel DPS dan DPSS</h1><p>Dashboard pendataan identitas petugas · Masuk sebagai {_lead_e(username)}</p></header><main><p><a class='btn' href='/admin/dashboard'>Dashboard Utama Admin</a> <a class='btn' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran Mandiri</a> <a class='btn' href='/pendaftaran-anggota' target='_blank' rel='noopener'>Buka Formulir Anggota</a></p>{deleted_notice}<section class='panel'><form method='get'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, ID, nomor HP, wilayah' style='width:min(440px,75%)'><button>Cari</button></form><h2>Daftar akun petugas ({len(rows)})</h2><table><thead><tr><th>Foto</th><th>Nama / ID / Peran</th><th>Nomor HP</th><th>Wilayah / Desa</th><th>Status akun</th><th>Kelola</th></tr></thead><tbody>{''.join(body)}</tbody></table></section></main></body></html>"""
     return HTMLResponse(html)
 
 
@@ -4322,245 +4312,6 @@ def pimpinan_verifikasi_pdf(request: Request, username: str = Depends(verify_pim
     return _lead_export_pdf(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.pdf","Laporan Verifikasi DPS")
 
 # =========================================================
-# MODUL EKSPOR DATA ANGGOTA (EXCEL/PDF) DENGAN PEMBATASAN WILAYAH
-# =========================================================
-
-def _member_export_scope(role: str, identity: dict):
-    """Bangun filter dari cakupan resmi akun, bukan dari isian pendaftar."""
-    def norm(column: str) -> str:
-        return f"lower(trim(regexp_replace(regexp_replace(coalesce(r.{column},''), '^(kecamatan|kec\\.?|kabupaten|kab\\.?|kota|desa|kelurahan|provinsi|prov\\.?)[[:space:]]+', '', 'i'), '[[:space:]]+', ' ', 'g')))"
-    if role == "DPS":
-        identity = _require_dps_export_scope(identity)
-        return (f"{norm('province_name')}=%s AND {norm('regency_name')}=%s AND {norm('district_name')}=%s",
-                (_normalize_region_name(identity["scope_province"]),
-                 _normalize_region_name(identity["scope_regency"]),
-                 _normalize_region_name(identity["scope_district"])))
-    if role == "DPC":
-        _require_verified_monitor_scope("DPC", identity)
-        return (f"{norm('province_name')}=%s AND {norm('regency_name')}=%s",
-                (_normalize_region_name(identity["scope_province"]), _normalize_region_name(identity["scope_regency"])))
-    if role == "DPD":
-        _require_verified_monitor_scope("DPD", identity)
-        return (f"{norm('province_name')}=%s", (_normalize_region_name(identity["scope_province"]),))
-    raise HTTPException(status_code=403, detail="Peran ini tidak memiliki kewenangan ekspor data anggota.")
-
-
-def _require_dps_export_scope(identity: dict):
-    if identity.get("role") != "DPS" or identity.get("scope_verified") not in (1, True):
-        raise HTTPException(status_code=403, detail="Ekspor hanya tersedia untuk akun DPS dengan cakupan wilayah yang disahkan.")
-    keys = ("scope_province", "scope_regency", "scope_district")
-    if not all(_normalize_region_name(identity.get(k)) for k in keys):
-        raise HTTPException(status_code=403, detail="Cakupan Provinsi, Kabupaten/Kota, dan Kecamatan belum lengkap.")
-    return identity
-
-
-def _member_export_rows(role: str, identity: dict):
-    where_sql, params = _member_export_scope(role, identity)
-    with get_db() as connection:
-        rows = connection.execute(f"""
-            SELECT r.id, r.full_name, r.org_position, r.org_level, r.phone,
-                   r.province_name, r.regency_name, r.district_name, r.village_name,
-                   r.profile_photo_path, r.ktp_path, r.member_code
-            FROM organization_member_registrations r
-            WHERE r.status='approved' AND ({where_sql})
-            ORDER BY r.province_name, r.regency_name, r.district_name, r.village_name, r.full_name
-        """, params).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _member_export_log(identity: dict, role: str, fmt: str, count: int):
-    with get_db() as connection:
-        connection.execute("""INSERT INTO organization_member_export_logs
-            (officer_id, actor_username, actor_role, export_format, scope_province,
-             scope_regency, scope_district, exported_count)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (identity.get("officer_id"), identity.get("member_id", ""), role, fmt,
-             identity.get("scope_province", ""), identity.get("scope_regency", ""),
-             identity.get("scope_district", ""), count))
-
-
-def _member_export_image_bytes(object_path: str):
-    if not object_path:
-        return None
-    signed = create_supabase_signed_url(object_path, expires_in=300, bucket=_officer_private_bucket())
-    if not signed:
-        return None
-    try:
-        req = urllib.request.Request(signed, headers={"User-Agent": "SIDPS-Private-Export/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            data = response.read(5 * 1024 * 1024 + 1)
-        if not data or len(data) > 5 * 1024 * 1024:
-            return None
-        return data
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
-        print(f"SIDPS member export: gagal mengambil media privat ({type(exc).__name__}).", flush=True)
-        return None
-
-
-def _member_export_area(row: dict) -> str:
-    return " · ".join(str(row.get(k) or "").strip() for k in
-        ("province_name", "regency_name", "district_name", "village_name") if str(row.get(k) or "").strip()) or "-"
-
-
-def _member_export_excel(rows: list[dict], filename: str):
-    import io
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.drawing.image import Image as XLImage
-    from PIL import Image as PILImage
-
-    output = io.BytesIO()
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Data Anggota"
-    ws.append(["Foto Diri", "Foto KTP", "Informasi Identitas"])
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="5B1018")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 26
-    ws.column_dimensions["A"].width = 19
-    ws.column_dimensions["B"].width = 19
-    ws.column_dimensions["C"].width = 62
-    thin = Side(style="thin", color="D8C8B8")
-    for index, row in enumerate(rows, start=2):
-        ws.cell(index, 1, "")
-        ws.cell(index, 2, "")
-        identity_text = (
-            f"Nama: {row.get('full_name') or '-'}\n"
-            f"Jabatan: {row.get('org_position') or '-'}\n"
-            f"Tingkat: {row.get('org_level') or '-'}\n"
-            f"Wilayah: {_member_export_area(row)}\n"
-            f"No. Telepon: {row.get('phone') or '-'}"
-        )
-        c = ws.cell(index, 3, identity_text)
-        c.alignment = Alignment(vertical="center", wrap_text=True)
-        for col in range(1, 4):
-            cell = ws.cell(index, col)
-            cell.border = Border(bottom=thin)
-            if col != 3:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[index].height = 66
-        for col, path_key in ((1, "profile_photo_path"), (2, "ktp_path")):
-            raw = _member_export_image_bytes(row.get(path_key) or "")
-            if raw:
-                try:
-                    image = XLImage(io.BytesIO(raw))
-                    image.width, image.height = 82, 58
-                    ws.add_image(image, f"{'A' if col == 1 else 'B'}{index}")
-                except Exception as exc:
-                    print(f"SIDPS Excel image skipped: {type(exc).__name__}", flush=True)
-                    ws.cell(index, col, "Foto tidak tersedia")
-            else:
-                ws.cell(index, col, "Foto tidak tersedia")
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:C{max(1, len(rows)+1)}"
-    ws.sheet_view.showGridLines = False
-    ws.page_setup.orientation = "portrait"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    wb.save(output)
-    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
-
-
-def _member_export_pdf(rows: list[dict], filename: str, title: str):
-    import io
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Table, LongTable, TableStyle, Paragraph, Spacer, Image as RLImage
-    from reportlab.lib.utils import ImageReader
-
-    output = io.BytesIO()
-    doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=12*mm, leftMargin=12*mm,
-                            topMargin=13*mm, bottomMargin=13*mm, title=title)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="MemberCell", parent=styles["BodyText"], fontName="Helvetica", fontSize=8, leading=10, wordWrap="CJK"))
-    styles.add(ParagraphStyle(name="MemberHead", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=8, leading=9, textColor=colors.white, alignment=1))
-    story = [Paragraph(title, styles["Title"]), Spacer(1, 4*mm),
-             Paragraph(f"Jumlah anggota terverifikasi: {len(rows)}", styles["BodyText"]), Spacer(1, 4*mm)]
-    data = [[Paragraph("Foto Diri", styles["MemberHead"]), Paragraph("Foto KTP", styles["MemberHead"]), Paragraph("Informasi Identitas", styles["MemberHead"])]]
-    for row in rows:
-        cells = []
-        for path_key in ("profile_photo_path", "ktp_path"):
-            raw = _member_export_image_bytes(row.get(path_key) or "")
-            if raw:
-                try:
-                    img = RLImage(io.BytesIO(raw), width=25*mm, height=20*mm, kind="proportional")
-                    img.hAlign = "CENTER"
-                    cells.append(img)
-                except Exception:
-                    cells.append(Paragraph("Foto tidak tersedia", styles["MemberCell"]))
-            else:
-                cells.append(Paragraph("Foto tidak tersedia", styles["MemberCell"]))
-        info = (f"<b>Nama:</b> {escape(str(row.get('full_name') or '-'))}<br/>"
-                f"<b>Jabatan:</b> {escape(str(row.get('org_position') or '-'))}<br/>"
-                f"<b>Tingkat:</b> {escape(str(row.get('org_level') or '-'))}<br/>"
-                f"<b>Wilayah:</b> {escape(_member_export_area(row))}<br/>"
-                f"<b>No. Telepon:</b> {escape(str(row.get('phone') or '-'))}")
-        cells.append(Paragraph(info, styles["MemberCell"]))
-        data.append(cells)
-    table = LongTable(data, colWidths=[31*mm, 31*mm, 124*mm], repeatRows=1, hAlign="LEFT")
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#5B1018")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("GRID", (0,0), (-1,-1), 0.45, colors.HexColor("#C9B8A8")),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("ALIGN", (0,0), (1,-1), "CENTER"),
-        ("LEFTPADDING", (0,0), (-1,-1), 5), ("RIGHTPADDING", (0,0), (-1,-1), 5),
-        ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-    ]))
-    story.append(table)
-    doc.build(story)
-    return Response(content=output.getvalue(), media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
-
-
-def _member_export_response(role: str, identity: dict, fmt: str):
-    rows = _member_export_rows(role, identity)
-    scope_label = role.lower()
-    if fmt == "excel":
-        response = _member_export_excel(rows, f"data_anggota_{scope_label}.xlsx")
-    else:
-        response = _member_export_pdf(rows, f"data_anggota_{scope_label}.pdf", f"Data Anggota Terverifikasi {role}")
-    _member_export_log(identity, role, fmt, len(rows))
-    return response
-
-
-@app.get("/dps/anggota/export/excel")
-def dps_member_export_excel(identity: dict = Depends(require_verified_dps_scope)):
-    return _member_export_response("DPS", identity, "excel")
-
-
-@app.get("/dps/anggota/export/pdf")
-def dps_member_export_pdf(identity: dict = Depends(require_verified_dps_scope)):
-    return _member_export_response("DPS", identity, "pdf")
-
-
-@app.get("/dpc/anggota/export/excel")
-def dpc_member_export_excel(identity: dict = Depends(require_verified_dpc_scope)):
-    return _member_export_response("DPC", identity, "excel")
-
-
-@app.get("/dpc/anggota/export/pdf")
-def dpc_member_export_pdf(identity: dict = Depends(require_verified_dpc_scope)):
-    return _member_export_response("DPC", identity, "pdf")
-
-
-@app.get("/dpd/anggota/export/excel")
-def dpd_member_export_excel(identity: dict = Depends(require_verified_dpd_scope)):
-    return _member_export_response("DPD", identity, "excel")
-
-
-@app.get("/dpd/anggota/export/pdf")
-def dpd_member_export_pdf(identity: dict = Depends(require_verified_dpd_scope)):
-    return _member_export_response("DPD", identity, "pdf")
-
-# =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
 # =========================================================
 
@@ -4570,5 +4321,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
     )
-
-
