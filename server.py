@@ -50,9 +50,9 @@ api_key_header = APIKeyHeader(
 )
 
 app = FastAPI(
-    title="Survei GPS API",
-    description="Server pusat aplikasi Survei GPS. Pengelolaan akun menggunakan istilah DPS (Kecamatan) dan DPSS (Desa/Kelurahan).",
-    version="3.11.0-member-id-directory",
+    title="SIDPS 555 API",
+    description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
+    version="3.12.0-four-tier-region-foundation",
 )
 
 app.add_middleware(
@@ -197,12 +197,17 @@ def _member_code_prefix(org_level: str, region: str, village_name: str = "") -> 
     region_code = _member_short_code(region, {
         "TAMBANG": "TBG",
     })
-    if str(org_level).upper() == "DPSS":
+    level = str(org_level).upper()
+    if level == "DPSS":
         village_code = _member_short_code(village_name, {
             "AUR SATI": "AST",
             "BALAM JAYA": "BLJ",
         })
         return f"DPSS{region_code}{village_code}"
+    if level == "DPC":
+        return f"DPC{region_code}"
+    if level == "DPD":
+        return f"DPD{region_code}"
     return f"DPS{region_code}"
 
 
@@ -482,6 +487,92 @@ def initialize_database():
                 reviewed_at TIMESTAMPTZ
             )
         """)
+        # Struktur wilayah empat tingkat. Kolom lama region/village_id dipertahankan
+        # agar halaman dan data versi sebelumnya tetap kompatibel.
+        region_columns = {
+            "province_name": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "regency_name": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "district_name": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "village_name": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "area_verification_status": "VARCHAR(30) NOT NULL DEFAULT 'pending'",
+            "area_verified_by": "VARCHAR(100) NOT NULL DEFAULT ''",
+            "area_verified_at": "TIMESTAMPTZ",
+            "area_verification_note": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column_name, column_type in region_columns.items():
+            connection.execute(f"ALTER TABLE organization_member_registrations ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
+        officer_scope_columns = {
+            "scope_province": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "scope_regency": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "scope_district": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "scope_village_name": "VARCHAR(150) NOT NULL DEFAULT ''",
+            "scope_verified": "INTEGER NOT NULL DEFAULT 0",
+            "scope_verified_by": "VARCHAR(100) NOT NULL DEFAULT ''",
+            "scope_verified_at": "TIMESTAMPTZ",
+        }
+        for column_name, column_type in officer_scope_columns.items():
+            connection.execute(f"ALTER TABLE officers ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
+        # Ganti CHECK lama secara terarah tanpa mengasumsikan nama constraint bawaan PostgreSQL.
+        connection.execute("""DO $$ DECLARE c RECORD; BEGIN
+            FOR c IN SELECT conname FROM pg_constraint
+                WHERE conrelid='organization_member_registrations'::regclass AND contype='c'
+                  AND pg_get_constraintdef(oid) ILIKE '%org_level%'
+            LOOP EXECUTE format('ALTER TABLE organization_member_registrations DROP CONSTRAINT %I', c.conname); END LOOP;
+            ALTER TABLE organization_member_registrations ADD CONSTRAINT org_reg_level_four_tier_check
+                CHECK (org_level IN ('DPD','DPC','DPS','DPSS'));
+        END $$""")
+        connection.execute("""DO $$ DECLARE c RECORD; BEGIN
+            FOR c IN SELECT conname FROM pg_constraint
+                WHERE conrelid='officers'::regclass AND contype='c'
+                  AND pg_get_constraintdef(oid) ILIKE '%role%'
+            LOOP EXECUTE format('ALTER TABLE officers DROP CONSTRAINT %I', c.conname); END LOOP;
+            ALTER TABLE officers ADD CONSTRAINT officers_role_four_tier_check
+                CHECK (role IN ('DPD','DPC','DPS','DPSS'));
+        END $$""")
+        # Backfill hanya informasi lama yang dapat dipastikan; provinsi/kabupaten
+        # tidak ditebak dan seluruh data lama menunggu pemeriksaan wilayah.
+        connection.execute("""UPDATE organization_member_registrations r
+            SET district_name=COALESCE(NULLIF(r.district_name,''),NULLIF(r.region,'')),
+                village_name=COALESCE(NULLIF(r.village_name,''),NULLIF(v.village_name,'')),
+                area_verification_status=CASE WHEN r.area_verification_status='pending' THEN 'legacy_pending_review' ELSE r.area_verification_status END
+            FROM villages v WHERE r.village_id=v.id""")
+        connection.execute("""UPDATE organization_member_registrations
+            SET district_name=COALESCE(NULLIF(district_name,''),NULLIF(region,'')),
+                area_verification_status=CASE WHEN area_verification_status='pending' THEN 'legacy_pending_review' ELSE area_verification_status END
+            WHERE district_name='' OR area_verification_status='pending'""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_org_reg_region_hierarchy ON organization_member_registrations(province_name,regency_name,district_name,village_name)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_officers_scope_hierarchy ON officers(scope_province,scope_regency,scope_district)")
+        connection.execute("""CREATE TABLE IF NOT EXISTS officer_scope_audit_logs (
+            id BIGSERIAL PRIMARY KEY,
+            officer_id BIGINT REFERENCES officers(id) ON DELETE SET NULL,
+            actor_username VARCHAR(150) NOT NULL DEFAULT '',
+            old_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+            new_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS organization_targets (
+            id BIGSERIAL PRIMARY KEY,
+            target_name VARCHAR(100) NOT NULL UNIQUE,
+            target_count BIGINT NOT NULL CHECK (target_count >= 0),
+            active INTEGER NOT NULL DEFAULT 1,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        connection.execute("""INSERT INTO organization_targets (target_name,target_count)
+            VALUES ('anggota_terverifikasi_nasional',8000)
+            ON CONFLICT (target_name) DO NOTHING""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS organization_member_export_logs (
+            id BIGSERIAL PRIMARY KEY,
+            officer_id BIGINT REFERENCES officers(id) ON DELETE SET NULL,
+            actor_username VARCHAR(150) NOT NULL DEFAULT '',
+            actor_role VARCHAR(10) NOT NULL DEFAULT '',
+            export_format VARCHAR(10) NOT NULL,
+            scope_province VARCHAR(150) NOT NULL DEFAULT '',
+            scope_regency VARCHAR(150) NOT NULL DEFAULT '',
+            scope_district VARCHAR(150) NOT NULL DEFAULT '',
+            exported_count INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+
         connection.execute("CREATE INDEX IF NOT EXISTS idx_org_reg_status_created ON organization_member_registrations(status, created_at DESC)")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_org_reg_nik_unique ON organization_member_registrations(nik)")
         connection.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS village_id BIGINT REFERENCES villages(id)")
@@ -601,8 +692,9 @@ def get_request_identity(
             with get_db() as connection:
                 row = connection.execute(
                     """
-                    SELECT o.member_id, o.member_name, o.role, o.region, o.active,
-                           s.expires_at
+                    SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+                           o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name,
+                           o.scope_verified, s.expires_at
                     FROM officer_sessions s
                     JOIN officers o ON o.id = s.officer_id
                     WHERE s.token_hash = %s AND s.expires_at > NOW()
@@ -616,6 +708,12 @@ def get_request_identity(
                     "member_name": row["member_name"],
                     "role": row["role"],
                     "region": row["region"],
+                    "officer_id": row["officer_id"],
+                    "scope_province": row["scope_province"],
+                    "scope_regency": row["scope_regency"],
+                    "scope_district": row["scope_district"],
+                    "scope_village_name": row["scope_village_name"],
+                    "scope_verified": row["scope_verified"],
                 }
 
     raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
@@ -632,7 +730,9 @@ def get_officer_identity(
     with get_db() as connection:
         row = connection.execute(
             """
-            SELECT o.member_id, o.member_name, o.role, o.region, o.active, s.expires_at
+            SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+                   o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name,
+                   o.scope_verified, s.expires_at
             FROM officer_sessions s
             JOIN officers o ON o.id = s.officer_id
             WHERE s.token_hash = %s AND s.expires_at > NOW()
@@ -647,6 +747,12 @@ def get_officer_identity(
         "member_name": row["member_name"],
         "role": row["role"],
         "region": row["region"],
+        "officer_id": row["officer_id"],
+        "scope_province": row["scope_province"],
+        "scope_regency": row["scope_regency"],
+        "scope_district": row["scope_district"],
+        "scope_village_name": row["scope_village_name"],
+        "scope_verified": row["scope_verified"],
     }
 
 
@@ -698,12 +804,20 @@ def officer_login(payload: OfficerLogin):
         "member_name": officer["member_name"],
         "role": officer["role"],
         "region": officer["region"],
+        "scope_province": officer.get("scope_province", ""),
+        "scope_regency": officer.get("scope_regency", ""),
+        "scope_district": officer.get("scope_district", ""),
+        "scope_village_name": officer.get("scope_village_name", ""),
+        "scope_verified": officer.get("scope_verified", 0),
     }
 
 
 @app.get("/auth/me")
 def officer_me(identity: dict = Depends(get_officer_identity)):
-    return {key: identity[key] for key in ("member_id", "member_name", "role", "region")}
+    return {key: identity.get(key) for key in (
+        "member_id", "member_name", "role", "region", "scope_province",
+        "scope_regency", "scope_district", "scope_village_name", "scope_verified"
+    )}
 
 
 @app.post("/auth/logout")
@@ -742,6 +856,66 @@ def list_officers(_: bool = Depends(verify_api_key)):
                FROM officers o ORDER BY o.role, o.region, o.member_id"""
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+class OfficerScopeUpdate(BaseModel):
+    province: str = Field(default="", max_length=150)
+    regency: str = Field(default="", max_length=150)
+    district: str = Field(default="", max_length=150)
+    village: str = Field(default="", max_length=150)
+
+
+@app.post("/admin/akun-petugas/{officer_id}/cakupan-wilayah")
+def admin_set_officer_scope(
+    officer_id: int,
+    payload: OfficerScopeUpdate,
+    username: str = Depends(verify_admin),
+):
+    """Tetapkan cakupan resmi akun. Hanya admin; data pendaftaran tidak dapat mengubahnya."""
+    province = payload.province.strip()
+    regency = payload.regency.strip()
+    district = payload.district.strip()
+    village = payload.village.strip()
+    with get_db() as connection:
+        officer = connection.execute("""SELECT id,member_id,role,scope_province,scope_regency,
+            scope_district,scope_village_name,scope_verified FROM officers WHERE id=%s FOR UPDATE""",
+            (officer_id,)).fetchone()
+        if not officer:
+            raise HTTPException(status_code=404, detail="Akun petugas tidak ditemukan.")
+        required = {
+            "DPD": (province,),
+            "DPC": (province, regency),
+            "DPS": (province, regency, district),
+            "DPSS": (province, regency, district, village),
+        }
+        if officer["role"] not in required:
+            raise HTTPException(status_code=422, detail="Tingkat akun tidak dikenali.")
+        if not all(_normalize_region_name(value) for value in required[officer["role"]]):
+            raise HTTPException(status_code=422, detail=f"Cakupan wilayah belum lengkap untuk peran {officer['role']}.")
+        if officer["role"] not in {"DPSS"}:
+            village = ""
+        if officer["role"] not in {"DPS", "DPSS"}:
+            district = ""
+        if officer["role"] not in {"DPC", "DPS", "DPSS"}:
+            regency = ""
+        old_scope = {
+            "province": officer["scope_province"], "regency": officer["scope_regency"],
+            "district": officer["scope_district"], "village": officer["scope_village_name"],
+            "verified": officer["scope_verified"],
+        }
+        new_scope = {"province": province, "regency": regency, "district": district,
+                     "village": village, "verified": 1}
+        connection.execute("""UPDATE officers SET scope_province=%s,scope_regency=%s,
+            scope_district=%s,scope_village_name=%s,scope_verified=1,
+            scope_verified_by=%s,scope_verified_at=NOW(),updated_at=NOW() WHERE id=%s""",
+            (province, regency, district, village, username, officer_id))
+        connection.execute("""INSERT INTO officer_scope_audit_logs
+            (officer_id,actor_username,old_scope,new_scope) VALUES (%s,%s,%s,%s)""",
+            (officer_id, username, Jsonb(old_scope), Jsonb(new_scope)))
+        # Paksa login ulang agar token lama tidak terus memakai cakupan sebelumnya.
+        connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer_id,))
+    return {"message": "Cakupan wilayah resmi berhasil ditetapkan.", "officer_id": officer_id,
+            "role": officer["role"], "scope": new_scope}
 
 
 class VillageCreate(BaseModel):
@@ -1227,6 +1401,91 @@ def require_dps(identity: dict = Depends(get_officer_identity)):
     if identity.get("role") != "DPS":
         raise HTTPException(status_code=403, detail="Fitur ini khusus akun petugas DPS.")
     return identity
+
+
+def _normalize_region_name(value: str | None) -> str:
+    """Normalisasi label wilayah untuk perbandingan, bukan untuk menetapkan otoritas."""
+    value = unicodedata.normalize("NFKC", (value or "")).strip().casefold()
+    value = re.sub(r"^(kecamatan|kec\.?|kabupaten|kab\.?|kota|desa|kelurahan)\s+", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" ,.;")
+
+
+def require_verified_dps_scope(identity: dict = Depends(require_dps)):
+    # Akun DPS hanya boleh memeriksa data setelah cakupan resminya ditetapkan
+    # oleh admin/pimpinan. Isian wilayah dari pendaftar tidak pernah memberi hak akses.
+    if identity.get("scope_verified") not in (1, True):
+        raise HTTPException(status_code=403, detail="Cakupan wilayah akun DPS belum diverifikasi oleh admin/pimpinan.")
+    required_scope = (identity.get("scope_province"), identity.get("scope_regency"), identity.get("scope_district"))
+    if not all(_normalize_region_name(v) for v in required_scope):
+        raise HTTPException(status_code=403, detail="Cakupan Provinsi, Kabupaten/Kota, dan Kecamatan akun DPS belum lengkap.")
+    return identity
+
+
+class DPSRegistrationReview(BaseModel):
+    status: str = Field(pattern="^(approved|revision|rejected)$")
+    note: str = Field(default="", max_length=2000)
+
+
+def _dps_registration_scope_sql() -> str:
+    """Ekspresi SQL normalisasi sederhana yang sejalan dengan helper Python."""
+    def norm(col: str) -> str:
+        return "lower(trim(regexp_replace(regexp_replace(coalesce(" + col + ",''), '^(kecamatan|kec\\.?|kabupaten|kab\\.?|kota|desa|kelurahan)[[:space:]]+', '', 'i'), '[[:space:]]+', ' ', 'g')))"
+    return f"{norm('r.province_name')}=%s AND {norm('r.regency_name')}=%s AND {norm('r.district_name')}=%s"
+
+
+@app.get("/dps/pendaftaran-anggota")
+def dps_list_member_registrations(identity: dict = Depends(require_verified_dps_scope)):
+    """Daftar pendaftaran hanya dalam wilayah DPS yang sudah ditetapkan secara resmi."""
+    province = _normalize_region_name(identity["scope_province"])
+    regency = _normalize_region_name(identity["scope_regency"])
+    district = _normalize_region_name(identity["scope_district"])
+    scope_sql = _dps_registration_scope_sql()
+    with get_db() as connection:
+        rows = connection.execute(f"""SELECT r.id, r.registration_code, r.member_code,
+                r.full_name, r.nik, r.phone, r.org_level, r.org_position,
+                r.province_name, r.regency_name, r.district_name, r.village_name,
+                r.status, r.area_verification_status, r.area_verification_note,
+                r.profile_photo_path, r.ktp_path, r.created_at
+            FROM organization_member_registrations r
+            WHERE {scope_sql} AND r.org_level IN ('DPS','DPSS')
+              AND r.status IN ('pending','revision')
+            ORDER BY r.created_at ASC""", (province, regency, district)).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["profile_photo_url"] = create_supabase_signed_url(item.pop("profile_photo_path"), bucket=_officer_private_bucket()) if item.get("profile_photo_path") else None
+        item["ktp_url"] = create_supabase_signed_url(item.pop("ktp_path"), bucket=_officer_private_bucket()) if item.get("ktp_path") else None
+        result.append(item)
+    return {"scope": {"province": identity["scope_province"], "regency": identity["scope_regency"], "district": identity["scope_district"]}, "count": len(result), "registrations": result}
+
+
+@app.post("/dps/pendaftaran-anggota/{registration_id}/verifikasi")
+def dps_review_member_registration(
+    registration_id: int,
+    payload: DPSRegistrationReview,
+    identity: dict = Depends(require_verified_dps_scope),
+):
+    """DPS memutuskan pendaftaran hanya jika tiga tingkat wilayah cocok dengan scope resminya."""
+    province = _normalize_region_name(identity["scope_province"])
+    regency = _normalize_region_name(identity["scope_regency"])
+    district = _normalize_region_name(identity["scope_district"])
+    scope_sql = _dps_registration_scope_sql()
+    area_status = {"approved": "verified", "revision": "needs_revision", "rejected": "rejected"}[payload.status]
+    with get_db() as connection:
+        row = connection.execute(f"""SELECT id, status FROM organization_member_registrations r
+            WHERE r.id=%s AND {scope_sql} AND r.org_level IN ('DPS','DPSS') FOR UPDATE""", (registration_id, province, regency, district)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan dalam wilayah kewenangan akun DPS ini.")
+        if row["status"] not in ("pending", "revision"):
+            raise HTTPException(status_code=409, detail="Pendaftaran ini sudah memiliki keputusan akhir.")
+        connection.execute("""UPDATE organization_member_registrations
+            SET status=%s, admin_note=%s, area_verification_status=%s,
+                area_verified_by=%s, area_verified_at=NOW(), area_verification_note=%s,
+                updated_at=NOW(), reviewed_at=NOW()
+            WHERE id=%s""", (payload.status, payload.note.strip(), area_status,
+                identity["member_id"], payload.note.strip(), registration_id))
+    return {"message": "Pemeriksaan pendaftaran berhasil disimpan.", "registration_id": registration_id, "status": payload.status, "area_verification_status": area_status}
 
 
 @app.get("/dps/surveys")
@@ -2183,8 +2442,8 @@ def grant_app_access_to_verified_member(
         ).fetchone()
         if not registration:
             raise HTTPException(status_code=404, detail="Anggota terverifikasi tidak ditemukan. Pastikan status pendaftarannya Disetujui.")
-        if registration["org_level"] not in {"DPS", "DPSS"}:
-            raise HTTPException(status_code=422, detail="Tingkat kepengurusan anggota tidak valid untuk akses aplikasi survei.")
+        if registration["org_level"] not in {"DPD", "DPC", "DPS", "DPSS"}:
+            raise HTTPException(status_code=422, detail="Tingkat kepengurusan anggota tidak valid untuk akses aplikasi.")
         if registration["org_level"] == "DPSS" and not registration["village_id"]:
             raise HTTPException(status_code=422, detail="Data anggota DPSS belum memiliki desa penugasan. Perbaiki data pendaftarannya terlebih dahulu.")
         member_id = (registration.get("linked_member_id") or registration.get("member_code") or "").strip().upper()
@@ -2714,10 +2973,15 @@ main{{max-width:1120px;margin:24px auto;padding:0 16px 45px}}.panel{{background:
     <div><label>Nomor HP / WhatsApp *</label><input name='phone' required maxlength='30' inputmode='tel' autocomplete='tel'></div>
     <div><label>Email (opsional)</label><input type='email' name='email' maxlength='150' autocomplete='email'></div></div></div>
     <div class='panel'><h2>2. Kedudukan dalam organisasi</h2><div class='grid'>
-    <div><label>Tingkat kepengurusan *</label><select name='org_level' id='org_level' required><option value=''>Pilih</option><option value='DPS'>DPS · Kecamatan</option><option value='DPSS'>DPSS · Desa/Kelurahan</option></select></div>
+    <div><label>Tingkat kepengurusan *</label><select name='org_level' id='org_level' required><option value=''>Pilih</option><option value='DPD'>DPD · Provinsi</option><option value='DPC'>DPC · Kabupaten/Kota</option><option value='DPS'>DPS · Kecamatan</option><option value='DPSS'>DPSS · Desa/Kelurahan</option></select></div>
     <div><label>Jabatan organisasi sesuai SK *</label><input name='org_position' required maxlength='150' placeholder='Isi jabatan sesuai SK pengangkatan'></div>
-    <div><label>Wilayah / Kecamatan *</label><input name='region' required maxlength='150' value='Tambang'></div>
-    <div><label id='village_label'>Cakupan wilayah desa</label><select name='village_id' id='village_id'><option value='all'>Seluruh Desa (cakupan DPS)</option>{village_options}</select><p class='hint' id='village_hint'>Untuk DPS, pilih Seluruh Desa atau pilih desa tertentu bila penugasan hanya mencakup desa tersebut.</p></div>
+    <div><label>Provinsi *</label><input name='province_name' id='province_name' maxlength='150' placeholder='Nama provinsi'></div>
+    <div><label>Kabupaten / Kota</label><input name='regency_name' id='regency_name' maxlength='150' placeholder='Nama kabupaten/kota'></div>
+    <div><label>Kecamatan</label><input name='district_name' id='district_name' maxlength='150' placeholder='Nama kecamatan'></div>
+    <div><label>Desa / Kelurahan</label><input name='village_name' id='village_name' maxlength='150' placeholder='Nama desa/kelurahan'></div>
+    <input type='hidden' name='region' id='legacy_region' value=''>
+    <input type='hidden' name='village_id' value='all'>
+    <p class='hint full' id='region_hint'>Isi wilayah sesuai tingkat kepengurusan. Isian ini belum otomatis menjadi dasar hak akses.</p>
     </div><p class='hint'>Isi jabatan persis seperti yang tercantum dalam SK. Admin akan memeriksa kesesuaian tingkat dan wilayah.</p></div>
     <div class='panel'><h2>3. Foto dan dokumen</h2>
     <label>Foto profil *</label><input type='file' name='profile_photo' accept='image/jpeg,image/png,image/webp' required><p class='hint'>JPG, PNG, atau WEBP. Maksimal 5 MB.</p>
@@ -2727,28 +2991,15 @@ main{{max-width:1120px;margin:24px auto;padding:0 16px 45px}}.panel{{background:
     </form><script>
     (function(){{
       const level=document.getElementById('org_level');
-      const village=document.getElementById('village_id');
-      const label=document.getElementById('village_label');
-      const hint=document.getElementById('village_hint');
-      function syncVillage(){{
-        if(level.value==='DPSS'){{
-          label.textContent='Desa / Kelurahan DPSS *';
-          hint.textContent='Untuk DPSS, wajib pilih desa tempat kepengurusan.';
-          village.required=true;
-          if(village.value==='all') village.value='';
-          village.options[0].textContent='Pilih desa';
-          village.options[0].value='';
-        }}else{{
-          label.textContent='Cakupan wilayah desa';
-          hint.textContent='Untuk DPS, pilih Seluruh Desa atau pilih desa tertentu bila penugasan hanya mencakup desa tersebut.';
-          village.required=false;
-          village.options[0].textContent='Seluruh Desa (cakupan DPS)';
-          village.options[0].value='all';
-          if(!village.value) village.value='all';
-        }}
+      const fields={{province_name:document.getElementById('province_name'),regency_name:document.getElementById('regency_name'),district_name:document.getElementById('district_name'),village_name:document.getElementById('village_name')}};
+      const legacy=document.getElementById('legacy_region');
+      function syncRegion(){{
+        const required={{DPD:['province_name'],DPC:['province_name','regency_name'],DPS:['province_name','regency_name','district_name'],DPSS:['province_name','regency_name','district_name','village_name']}}[level.value]||[];
+        Object.entries(fields).forEach(([key,input])=>{{input.required=required.includes(key)}});
+        legacy.value=fields.district_name.value||fields.regency_name.value||fields.province_name.value;
       }}
-      level.addEventListener('change',syncVillage);
-      syncVillage();
+      Object.values(fields).forEach(input=>input.addEventListener('input',syncRegion));
+      level.addEventListener('change',syncRegion);syncRegion();
     }})();
     </script></main></body></html>"""
     return HTMLResponse(html)
@@ -2759,13 +3010,18 @@ def submit_public_member_registration(
     full_name: str = Form(...), nik: str = Form(...), gender: str = Form(...),
     birth_place: str = Form(""), birth_date: str = Form(""), address: str = Form(...),
     phone: str = Form(...), email: str = Form(""), org_level: str = Form(...),
-    org_position: str = Form(...), region: str = Form(...), village_id: str = Form("all"),
+    org_position: str = Form(...), region: str = Form(""), village_id: str = Form("all"),
+    province_name: str = Form(""), regency_name: str = Form(""), district_name: str = Form(""), village_name: str = Form(""),
     profile_photo: UploadFile | None = File(None),
     ktp_photo: UploadFile | None = File(None),
 ):
     full_name, nik, gender = full_name.strip(), re.sub(r"\D", "", nik), gender.strip()
     address, phone, email = address.strip(), phone.strip(), email.strip()
-    org_level, org_position, region = org_level.strip().upper(), org_position.strip(), region.strip()
+    org_level, org_position = org_level.strip().upper(), org_position.strip()
+    province_name, regency_name = province_name.strip(), regency_name.strip()
+    district_name, village_name = district_name.strip(), village_name.strip()
+    region = (district_name or regency_name or province_name or region).strip()
+    required_by_level = {"DPD": (province_name,), "DPC": (province_name, regency_name), "DPS": (province_name, regency_name, district_name), "DPSS": (province_name, regency_name, district_name, village_name)}
     village_value = (village_id or "").strip().lower()
     if village_value in {"", "all", "semua"}:
         village_id = None
@@ -2776,8 +3032,8 @@ def submit_public_member_registration(
             raise HTTPException(status_code=422, detail="Pilihan desa tidak valid.") from exc
     if len(full_name) < 3 or len(nik) != 16 or gender not in {"Laki-laki", "Perempuan"}:
         raise HTTPException(status_code=422, detail="Periksa nama, NIK 16 digit, dan jenis kelamin.")
-    if not address or len(phone) < 8 or org_level not in {"DPS", "DPSS"} or len(org_position) < 2 or not region:
-        raise HTTPException(status_code=422, detail="Lengkapi alamat, nomor HP, tingkat kepengurusan, jabatan, dan wilayah.")
+    if not address or len(phone) < 8 or org_level not in required_by_level or len(org_position) < 2 or not all(required_by_level.get(org_level, ())):
+        raise HTTPException(status_code=422, detail="Lengkapi alamat, nomor HP, tingkat kepengurusan, jabatan, dan wilayah sesuai tingkat organisasi.")
     if birth_date.strip():
         try:
             datetime.strptime(birth_date.strip(), "%Y-%m-%d")
@@ -2796,23 +3052,21 @@ def submit_public_member_registration(
             village = connection.execute("SELECT id FROM villages WHERE id=%s AND active=1", (village_id,)).fetchone()
             if not village:
                 raise HTTPException(status_code=422, detail="Desa yang dipilih tidak tersedia.")
-        if org_level == "DPSS" and village_id is None:
-            raise HTTPException(status_code=422, detail="Pilih desa untuk kepengurusan DPSS.")
+        # Pendaftaran wilayah baru menggunakan empat kolom teks bebas.
+        # village_id lama tetap didukung untuk kompatibilitas, bukan sebagai otorisasi.
     photo_path = _upload_officer_private(profile_photo, code, "profile")
     ktp_path = _upload_officer_private(ktp_photo, code, "ktp")
     with get_db() as connection:
-        village_name = ""
-        if village_id is not None:
-            village_row = connection.execute("SELECT village_name FROM villages WHERE id=%s", (village_id,)).fetchone()
-            village_name = village_row["village_name"] if village_row else ""
-        # Nomor dialokasikan dan baris pendaftaran disimpan dalam transaksi yang sama.
-        member_code = _allocate_member_code(connection, org_level, region, village_name)
+        # Nomor dialokasikan berdasarkan wilayah administratif paling spesifik yang tersedia.
+        code_region = district_name or regency_name or province_name
+        member_code = _allocate_member_code(connection, org_level, code_region, village_name)
         connection.execute("""INSERT INTO organization_member_registrations
             (registration_code,member_code,full_name,nik,birth_place,birth_date,gender,address,phone,email,
-             org_level,org_position,region,village_id,profile_photo_path,ktp_path)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+             org_level,org_position,region,village_id,province_name,regency_name,district_name,village_name,
+             area_verification_status,profile_photo_path,ktp_path)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)""",
             (code,member_code,full_name,nik,birth_place.strip(),birth_date.strip() or None,gender,address,phone,email,
-             org_level,org_position,region,village_id,photo_path,ktp_path))
+             org_level,org_position,region,village_id,province_name,regency_name,district_name,village_name,photo_path,ktp_path))
     return HTMLResponse(f"""<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>Pendaftaran diterima</title><body style='font:16px system-ui;background:#f4f0eb;padding:24px'><main style='max-width:600px;margin:8vh auto;background:white;padding:28px;border-radius:14px;border-top:6px solid #d8b15a'><h2 style='color:#5b1018'>Data berhasil dikirim</h2><p>Terima kasih. Pendaftaran anggota telah diterima dan menunggu pemeriksaan admin.</p><p><b>ID Member: {escape(member_code)}</b></p><p><b>Kode pendaftaran: {escape(code)}</b></p><p>Simpan ID Member dan kode pendaftaran ini untuk keperluan administrasi.</p><p><a href='/pendaftaran-anggota' style='display:inline-block;background:#5b1018;color:#fff;text-decoration:none;padding:11px 16px;border-radius:8px'>Kembali ke Formulir</a></p></main></body></html>""")
 
