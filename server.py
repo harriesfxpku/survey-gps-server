@@ -52,7 +52,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.0-superuser-global-access",
+    version="3.13.3-superuser-unified-session",
 )
 
 app.add_middleware(
@@ -91,19 +91,57 @@ def _record_superuser_activity(username: str, request: Request, action: str = "A
                 (username, action, request.method, request.url.path),
             )
     except Exception:
-        # Kegagalan pencatatan tidak boleh memutus akses sistem; error tetap terlihat di log server.
         import logging
         logging.exception("Gagal mencatat aktivitas SUPERUSER")
 
 
+def _superuser_session_username(token: str | None) -> str | None:
+    """Validasi cookie sesi global SUPERUSER yang berlaku maksimal 12 jam."""
+    if not token:
+        return None
+    with get_db() as connection:
+        row = connection.execute(
+            "SELECT username FROM superuser_sessions WHERE token_hash=%s AND expires_at>NOW()",
+            (_token_hash(token),),
+        ).fetchone()
+    return row["username"] if row else None
+
+
+def _issue_superuser_session(username: str) -> str:
+    """Buat token acak; hanya hash token yang disimpan di database."""
+    token = secrets.token_urlsafe(48)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
+    with get_db() as connection:
+        connection.execute("DELETE FROM superuser_sessions WHERE expires_at <= NOW()")
+        connection.execute(
+            "INSERT INTO superuser_sessions (username, token_hash, expires_at) VALUES (%s, %s, %s)",
+            (username, _token_hash(token), expires_at),
+        )
+    return token
+
+
+def _superuser_identity(username: str) -> dict:
+    return {
+        "auth_type": "superuser", "member_id": username, "member_name": "SUPERUSER",
+        "role": "SUPERUSER", "region": "NASIONAL", "officer_id": None,
+        "scope_province": "", "scope_regency": "", "scope_district": "",
+        "scope_village_name": "", "scope_verified": 1,
+    }
+
+
 def verify_superuser(
     request: Request,
-    credentials: HTTPBasicCredentials = Depends(admin_security),
+    sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "OPEN_SUPERUSER_DASHBOARD")
+        return session_username
     if not _superuser_credentials_match(credentials):
         raise HTTPException(
             status_code=401,
-            detail="Kredensial SUPERUSER salah atau belum dikonfigurasi di server.",
+            detail="Kredensial SUPERUSER salah atau sesi telah berakhir.",
             headers={"WWW-Authenticate": "Basic"},
         )
     _record_superuser_activity(credentials.username, request, "OPEN_SUPERUSER_DASHBOARD")
@@ -112,11 +150,18 @@ def verify_superuser(
 
 def verify_admin(
     request: Request,
-    credentials: HTTPBasicCredentials = Depends(admin_security),
+    sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "ADMIN_ACCESS")
+        return session_username
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "ADMIN_ACCESS")
         return credentials.username
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Silakan login sebagai admin atau SUPERUSER.", headers={"WWW-Authenticate": "Basic"})
     admin_username = os.environ.get("ADMIN_USERNAME", "")
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
 
@@ -782,8 +827,13 @@ def startup_event():
 def verify_api_key(
     request: Request,
     api_key: str = Depends(api_key_header),
+    sidps_session: str | None = Cookie(default=None),
     credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "ADMIN_API_ACCESS")
+        return True
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "ADMIN_API_ACCESS")
         return True
@@ -818,12 +868,17 @@ def get_request_identity(
     request: Request,
     authorization: str | None = Header(default=None),
     api_key: str | None = Depends(api_key_header),
+    sidps_session: str | None = Cookie(default=None),
     credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
-    # SUPERUSER memiliki akses global melalui satu kredensial khusus Hostless.
+    # SUPERUSER dapat memakai kredensial Basic, token Bearer, atau cookie browser global.
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "APPLICATION_API_ACCESS")
+        return _superuser_identity(session_username)
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "APPLICATION_API_ACCESS")
-        return {"auth_type": "superuser", "member_id": credentials.username, "member_name": "SUPERUSER", "role": "SUPERUSER", "scope_verified": 1}
+        return _superuser_identity(credentials.username)
     # API key lama tetap diterima untuk kompatibilitas dashboard/versi aplikasi lama.
     if API_TOKEN and api_key and secrets.compare_digest(api_key, API_TOKEN):
         return {"auth_type": "api_key", "role": "LEGACY_ADMIN"}
@@ -864,7 +919,7 @@ def get_request_identity(
                 ).fetchone()
             if su:
                 _record_superuser_activity(su["username"], request, "APPLICATION_API_ACCESS")
-                return {"auth_type": "superuser", "member_id": su["username"], "member_name": "SUPERUSER", "role": "SUPERUSER", "scope_verified": 1}
+                return _superuser_identity(su["username"])
 
     raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
 
@@ -878,6 +933,10 @@ def get_officer_identity(
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "GLOBAL_DASHBOARD_ACCESS")
         return {"auth_type": "superuser", "member_id": credentials.username, "member_name": "SUPERUSER", "role": "SUPERUSER", "region": "NASIONAL", "officer_id": None, "scope_province": "", "scope_regency": "", "scope_district": "", "scope_village_name": "", "scope_verified": 1}
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "GLOBAL_DASHBOARD_ACCESS")
+        return _superuser_identity(session_username)
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -1784,7 +1843,10 @@ def dps_list_member_registrations(identity: dict = Depends(require_verified_dps_
     province = _normalize_region_name(identity["scope_province"])
     regency = _normalize_region_name(identity["scope_regency"])
     district = _normalize_region_name(identity["scope_district"])
-    scope_sql = _dps_registration_scope_sql()
+    if identity.get("role") == "SUPERUSER":
+        scope_sql, scope_params = "TRUE", ()
+    else:
+        scope_sql, scope_params = _dps_registration_scope_sql(), (province, regency, district)
     with get_db() as connection:
         rows = connection.execute(f"""SELECT r.id, r.registration_code, r.member_code,
                 r.full_name, r.nik, r.phone, r.org_level, r.org_position,
@@ -1794,7 +1856,7 @@ def dps_list_member_registrations(identity: dict = Depends(require_verified_dps_
             FROM organization_member_registrations r
             WHERE {scope_sql} AND r.org_level IN ('DPS','DPSS')
               AND r.status IN ('pending','revision')
-            ORDER BY r.created_at ASC""", (province, regency, district)).fetchall()
+            ORDER BY r.created_at ASC""", scope_params).fetchall()
     result = []
     for row in rows:
         item = dict(row)
@@ -1814,11 +1876,14 @@ def dps_review_member_registration(
     province = _normalize_region_name(identity["scope_province"])
     regency = _normalize_region_name(identity["scope_regency"])
     district = _normalize_region_name(identity["scope_district"])
-    scope_sql = _dps_registration_scope_sql()
+    if identity.get("role") == "SUPERUSER":
+        scope_sql, scope_params = "TRUE", ()
+    else:
+        scope_sql, scope_params = _dps_registration_scope_sql(), (province, regency, district)
     area_status = {"approved": "verified", "revision": "needs_revision", "rejected": "rejected"}[payload.status]
     with get_db() as connection:
         row = connection.execute(f"""SELECT id, status FROM organization_member_registrations r
-            WHERE r.id=%s AND {scope_sql} AND r.org_level IN ('DPS','DPSS') FOR UPDATE""", (registration_id, province, regency, district)).fetchone()
+            WHERE r.id=%s AND {scope_sql} AND r.org_level IN ('DPS','DPSS') FOR UPDATE""", (registration_id, *scope_params)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan dalam wilayah kewenangan akun DPS ini.")
         if row["status"] not in ("pending", "revision"):
@@ -1857,6 +1922,7 @@ def dps_browser_logout(sidps_session: str | None = Cookie(default=None)):
     if sidps_session:
         with get_db() as connection:
             connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+            connection.execute("DELETE FROM superuser_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
     response = RedirectResponse(url="/dps/login", status_code=303)
     response.delete_cookie("sidps_session", path="/")
     return response
@@ -1907,15 +1973,23 @@ def _monitoring_summary(role: str, identity: dict):
         )
 
     if role == "DPD":
-        where_sql = f"{sql_norm('province_name')}=%s"
-        params = (province,)
         group_column = "regency_name"
         group_label = "Kabupaten/Kota"
+        if identity.get("role") == "SUPERUSER":
+            where_sql = "TRUE"
+            params = ()
+        else:
+            where_sql = f"{sql_norm('province_name')}=%s"
+            params = (province,)
     else:
-        where_sql = f"{sql_norm('province_name')}=%s AND {sql_norm('regency_name')}=%s"
-        params = (province, regency)
         group_column = "district_name"
         group_label = "Kecamatan"
+        if identity.get("role") == "SUPERUSER":
+            where_sql = "TRUE"
+            params = ()
+        else:
+            where_sql = f"{sql_norm('province_name')}=%s AND {sql_norm('regency_name')}=%s"
+            params = (province, regency)
 
     with get_db() as connection:
         totals = connection.execute(f"""
@@ -1989,7 +2063,9 @@ def _monitoring_dashboard_html(role: str, identity: dict):
     data = _monitoring_summary(role, identity)
     scope = data["scope"]
     scope_text = scope["province"]
-    if role == "DPC":
+    if identity.get("role") == "SUPERUSER":
+        scope_text = "NASIONAL · AKSES GLOBAL SUPERUSER"
+    elif role == "DPC":
         scope_text += " · " + scope["regency"]
     summary = data["summary"]
     target = data["national_target"]
@@ -2011,7 +2087,7 @@ def _monitoring_dashboard_html(role: str, identity: dict):
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>{title} | SIDPS 555</title><meta http-equiv='refresh' content='60'><style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:14px/1.5 system-ui,Arial}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:white;padding:22px;border-bottom:3px solid #d8b15a}}main{{max-width:1150px;margin:auto;padding:20px}}.scope{{color:#f1d99c}}.grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0}}.card,.panel{{background:white;border:1px solid #e8ded8;border-radius:12px;padding:16px;box-shadow:0 4px 14px #31090e0b}}.card small{{color:#766b67}}.num{{font-size:27px;font-weight:800;color:#5b1018}}.panel{{margin:14px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:11px;border-bottom:1px solid #eee4dd;text-align:left}}th{{background:#f8f2e9;color:#5b1018}}.bar{{height:13px;background:#eee4dd;border-radius:20px;overflow:hidden}}.bar span{{display:block;height:100%;background:#b88a2e;width:{target['percentage']}%}}button{{border:0;background:#d8b15a;color:#31090e;padding:10px 15px;border-radius:8px;font-weight:800;cursor:pointer}}.top{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}}@media(max-width:800px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}main{{padding:12px}}}}
-    </style></head><body><header><div class='top'><div><h1 style='margin:0'>{title}</h1><div class='scope'>Cakupan resmi: {escape(scope_text)}</div><div>Monitoring anggota · Akses hanya-baca</div></div><form method='post' action='{logout_path}'><button type='submit'>Keluar</button></form></div></header><main>
+    </style></head><body><header><div class='top'><div><h1 style='margin:0'>{title}</h1><div class='scope'>Cakupan resmi: {escape(scope_text)}</div><div>Monitoring anggota · {'Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Akses hanya-baca'}</div></div><div style='display:flex;gap:8px;align-items:center'><a href='/superuser/dashboard' style='color:#f1d99c;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a><form method='post' action='{logout_path}'><button type='submit'>Keluar</button></form></div></div></header><main>
     <section class='grid'>
       <div class='card'><small>Anggota terdaftar</small><div class='num'>{summary['registered']}</div></div>
       <div class='card'><small>Terverifikasi</small><div class='num'>{summary['verified']}</div></div>
@@ -2071,6 +2147,7 @@ def dpc_browser_logout(sidps_session: str | None = Cookie(default=None)):
     if sidps_session:
         with get_db() as connection:
             connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+            connection.execute("DELETE FROM superuser_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
     response = RedirectResponse(url="/dpc/login", status_code=303)
     response.delete_cookie("sidps_session", path="/")
     return response
@@ -2081,6 +2158,7 @@ def dpd_browser_logout(sidps_session: str | None = Cookie(default=None)):
     if sidps_session:
         with get_db() as connection:
             connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+            connection.execute("DELETE FROM superuser_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
     response = RedirectResponse(url="/dpd/login", status_code=303)
     response.delete_cookie("sidps_session", path="/")
     return response
@@ -2108,7 +2186,10 @@ def dps_member_registration_dashboard(
     province = _normalize_region_name(identity["scope_province"])
     regency = _normalize_region_name(identity["scope_regency"])
     district = _normalize_region_name(identity["scope_district"])
-    scope_sql = _dps_registration_scope_sql()
+    if identity.get("role") == "SUPERUSER":
+        scope_sql, scope_params = "TRUE", ()
+    else:
+        scope_sql, scope_params = _dps_registration_scope_sql(), (province, regency, district)
     query = q.strip()
     with get_db() as connection:
         rows = connection.execute(f"""SELECT r.id, r.registration_code, r.member_code,
@@ -2122,7 +2203,7 @@ def dps_member_registration_dashboard(
               AND (%s='all' OR r.status=%s)
               AND (%s='' OR r.full_name ILIKE %s OR r.nik ILIKE %s OR r.phone ILIKE %s OR r.registration_code ILIKE %s)
             ORDER BY r.created_at ASC LIMIT 300""",
-            (province, regency, district, status, status, query,
+            (*scope_params, status, status, query,
              f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%")).fetchall()
 
     def esc(value):
@@ -2172,8 +2253,8 @@ def dps_member_registration_dashboard(
     return HTMLResponse(f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Anggota DPS</title>
     <style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:15px system-ui,Arial}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:24px max(18px,calc((100% - 1100px)/2));border-bottom:4px solid #d8b15a}}header h1{{margin:0 0 7px;font-size:24px}}header p{{margin:0;color:#f3dfb4}}main{{max-width:1100px;margin:24px auto;padding:0 16px}}.scope{{background:#fff8e9;border:1px solid #e6d4a9;border-radius:12px;padding:14px 16px;margin-bottom:18px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:18px 0}}.tabs{{display:flex;gap:7px;flex-wrap:wrap}}.tab{{padding:9px 13px;border-radius:8px;text-decoration:none;background:#e8dfd8;color:#5b1018;font-weight:650}}.tab.active{{background:#5b1018;color:white}}input{{padding:10px 12px;border:1px solid #cfc5bd;border-radius:8px;min-width:230px}}button{{border:0;background:#5b1018;color:white;padding:11px 16px;border-radius:8px;font-weight:700;cursor:pointer}}.count{{color:#6d5e5b;font-size:13px}}.card{{background:white;border-radius:14px;padding:20px;margin:14px 0;box-shadow:0 3px 15px #32101812;border:1px solid #eee5df}}.cardtop{{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}}h2{{margin:9px 0 3px;color:#5b1018}}.badge{{display:inline-block;background:#f4e7c8;color:#6b4b12;padding:5px 9px;border-radius:20px;font-size:11px;font-weight:800}}.muted{{color:#847773;font-size:12px}}.membercode{{text-align:right;color:#8a7771;font-size:12px}}.membercode b{{color:#5b1018;font-size:14px}}.photos{{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}}.photo{{width:150px;height:150px;object-fit:cover;border:1px solid #ddd;border-radius:10px;background:#fafafa}}.photo.ktp{{width:230px}}.missing{{width:150px;height:100px;border:1px dashed #cbbfb8;border-radius:10px;display:grid;place-items:center;color:#998b84;font-size:12px;text-align:center;padding:8px}}.details p{{margin:8px 0;line-height:1.5}}.decision{{border-top:1px solid #eee5df;margin-top:16px;padding-top:15px;display:grid;gap:8px;max-width:520px}}label{{font-weight:700;font-size:13px}}select,textarea{{font:inherit;padding:10px;border:1px solid #cfc5bd;border-radius:8px;background:white}}textarea{{resize:vertical}}.empty{{background:white;padding:35px;border-radius:12px;text-align:center;color:#786b66}}footer{{text-align:center;color:#938681;font-size:12px;padding:25px}}
-    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p>Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi</p></div><form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
-    <section class='scope'><b>Cakupan tugas:</b> {esc(identity['scope_district'])}, {esc(identity['scope_regency'])}, {esc(identity['scope_province'])}<br><small>Daftar ini hanya memuat pendaftaran DPS dan DPSS di wilayah kewenangan akun Anda.</small></section>
+    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p>{'Dashboard DPS · Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi'}</p></div>{"<a href='/superuser/dashboard' style='color:#f3dfb4;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a>" if identity.get('role') == 'SUPERUSER' else ''}<form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
+    <section class='scope'><b>Cakupan tugas:</b> {('NASIONAL · AKSES GLOBAL SUPERUSER' if identity.get('role') == 'SUPERUSER' else esc(identity['scope_district']) + ', ' + esc(identity['scope_regency']) + ', ' + esc(identity['scope_province']))}<br><small>{'SUPERUSER dapat melihat dan memeriksa pendaftaran DPS dan DPSS di seluruh wilayah.' if identity.get('role') == 'SUPERUSER' else 'Daftar ini hanya memuat pendaftaran DPS dan DPSS di wilayah kewenangan akun Anda.'}</small></section>
     <div class='toolbar'><nav class='tabs'>{tabs}</nav><form method='get' action='/dps/dashboard/pendaftaran-anggota'><input type='hidden' name='status' value='{esc(status)}'><input name='q' value='{esc(query)}' placeholder='Cari nama, NIK, telepon, kode'><button type='submit'>Cari</button></form></div>
     <div class='count'>{esc(count_label)} · Maksimal 300 data per tampilan</div>{body}
     </main><footer>SIDPS · Data anggota bersifat terbatas dan hanya untuk pemeriksaan sesuai kewenangan.</footer></body></html>""", headers={"Cache-Control": "no-store, private", "Pragma": "no-cache"})
@@ -2192,13 +2273,16 @@ def dps_submit_member_registration_decision(
     province = _normalize_region_name(identity["scope_province"])
     regency = _normalize_region_name(identity["scope_regency"])
     district = _normalize_region_name(identity["scope_district"])
-    scope_sql = _dps_registration_scope_sql()
+    if identity.get("role") == "SUPERUSER":
+        scope_sql, scope_params = "TRUE", ()
+    else:
+        scope_sql, scope_params = _dps_registration_scope_sql(), (province, regency, district)
     area_status = {"approved": "verified", "revision": "needs_revision", "rejected": "rejected"}[new_status]
     clean_note = note.strip()[:2000]
     with get_db() as connection:
         row = connection.execute(f"""SELECT id, status FROM organization_member_registrations r
             WHERE r.id=%s AND {scope_sql} AND r.org_level IN ('DPS','DPSS') FOR UPDATE""",
-            (registration_id, province, regency, district)).fetchone()
+            (registration_id, *scope_params)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Pendaftaran tidak ditemukan dalam wilayah kewenangan akun DPS ini.")
         if row["status"] not in ("pending", "revision"):
@@ -2728,9 +2812,13 @@ def delete_survey_from_admin(
 
 
 @app.get("/admin/kelola-akun", response_class=HTMLResponse)
-def account_management_dashboard(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
-    # Halaman ini dapat dibuka admin, pimpinan, maupun SUPERUSER.
-    username = verify_pimpinan_or_admin(request, credentials)
+def account_management_dashboard(
+    request: Request,
+    sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
+):
+    # Halaman ini dapat dibuka admin, pimpinan, maupun SUPERUSER melalui sesi global.
+    username = verify_pimpinan_or_admin(request, sidps_session, credentials)
     return HTMLResponse(r"""<!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kelola Akses Aplikasi | Triple 555</title>
@@ -2768,8 +2856,19 @@ def superuser_home():
 
 
 @app.get("/superuser/dashboard", response_class=HTMLResponse, tags=["Superuser"], summary="Dashboard akses global SUPERUSER")
-def superuser_dashboard(username: str = Depends(verify_superuser)):
-    """Pusat navigasi SUPERUSER ke dashboard yang tersedia pada server ini."""
+def superuser_dashboard(
+    request: Request,
+    response: Response,
+    username: str = Depends(verify_superuser),
+    sidps_session: str | None = Cookie(default=None),
+):
+    """Pusat navigasi SUPERUSER; menerbitkan cookie global agar semua dashboard mengenali sesi yang sama."""
+    if not _superuser_session_username(sidps_session):
+        token = _issue_superuser_session(username)
+        response.set_cookie(
+            "sidps_session", token, max_age=43200, httponly=True,
+            secure=True, samesite="lax", path="/",
+        )
     links = [
         ("Dashboard Admin", "/admin/dashboard", "Administrasi sistem, anggota, akun, dan data wilayah"),
         ("Dashboard Pimpinan", "/pimpinan", "Laporan survei, verifikasi, personel, dan peta"),
@@ -2787,8 +2886,20 @@ def superuser_dashboard(username: str = Depends(verify_superuser)):
         for title, path, desc in links
     )
     page = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>SUPERUSER | SIDPS 555</title>
-    <style>*{{box-sizing:border-box}}body{{margin:0;background:#16090c;color:#f7eee5;font:15px/1.5 system-ui,Arial}}header{{padding:25px;background:linear-gradient(110deg,#19080c,#500813 60%,#26090e);border-bottom:2px solid #e0ad35}}main{{max-width:1100px;margin:auto;padding:22px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}.card{{display:flex;flex-direction:column;gap:8px;padding:19px;border:1px solid #5b3939;border-radius:13px;background:#211316;color:#f1cb72;text-decoration:none;min-height:105px}}.card span{{color:#d7c7bd;font-size:13px}}.note{{margin:18px 0;padding:14px;border-left:4px solid #e0ad35;background:#211316;color:#e9ded5}}small{{color:#c8b6ad}}</style></head><body><header><h1 style='margin:0;color:#f1cb72'>SUPERUSER · SIDPS 555</h1><div>Akses global aktif untuk {escape(username)}</div><small>Satu akun pengendali utama. Pembatasan akses akun wilayah lainnya tetap berlaku.</small></header><main><div class='note'>Gunakan akses global secara bertanggung jawab. Aktivitas SUPERUSER pada endpoint yang dilindungi dicatat dalam audit log.</div><section class='grid'>{cards}</section></main></body></html>"""
+    <style>*{{box-sizing:border-box}}body{{margin:0;background:#16090c;color:#f7eee5;font:15px/1.5 system-ui,Arial}}header{{padding:25px;background:linear-gradient(110deg,#19080c,#500813 60%,#26090e);border-bottom:2px solid #e0ad35}}main{{max-width:1100px;margin:auto;padding:22px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}.card{{display:flex;flex-direction:column;gap:8px;padding:19px;border:1px solid #5b3939;border-radius:13px;background:#211316;color:#f1cb72;text-decoration:none;min-height:105px}}.card span{{color:#d7c7bd;font-size:13px}}.note{{margin:18px 0;padding:14px;border-left:4px solid #e0ad35;background:#211316;color:#e9ded5}}small{{color:#c8b6ad}}</style></head><body><header><h1 style='margin:0;color:#f1cb72'>SUPERUSER · SIDPS 555</h1><div>Akses global aktif untuk {escape(username)}</div><small>Satu akun pengendali utama. Pembatasan akses akun wilayah lainnya tetap berlaku.</small></header><main><div class='note'>Gunakan akses global secara bertanggung jawab. Aktivitas SUPERUSER pada endpoint yang dilindungi dicatat dalam audit log.</div><form method='post' action='/superuser/logout' style='margin:0 0 18px'><button type='submit' style='padding:10px 16px;border:0;border-radius:8px;background:#d8b15a;color:#31090e;font-weight:700'>Keluar SUPERUSER</button></form><section class='grid'>{cards}</section></main></body></html>"""
     return HTMLResponse(page)
+
+
+
+
+@app.post("/superuser/logout")
+def superuser_logout(sidps_session: str | None = Cookie(default=None)):
+    if sidps_session:
+        with get_db() as connection:
+            connection.execute("DELETE FROM superuser_sessions WHERE token_hash=%s", (_token_hash(sidps_session),))
+    response = RedirectResponse(url="/superuser", status_code=303)
+    response.delete_cookie("sidps_session", path="/")
+    return response
 
 
 @app.get("/superuser/audit", response_class=HTMLResponse, tags=["Superuser"], summary="Riwayat aktivitas SUPERUSER")
@@ -3127,11 +3238,21 @@ from fastapi.security import HTTPBasicCredentials
 from urllib.parse import urlencode
 
 
-def verify_pimpinan_or_admin(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
+def verify_pimpinan_or_admin(
+    request: Request,
+    sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
+):
     """Akses dashboard untuk admin, pimpinan, atau SUPERUSER."""
+    session_username = _superuser_session_username(sidps_session)
+    if session_username:
+        _record_superuser_activity(session_username, request, "LEADERSHIP_ACCESS")
+        return session_username
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "LEADERSHIP_ACCESS")
         return credentials.username
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Silakan login sebagai admin, pimpinan, atau SUPERUSER.", headers={"WWW-Authenticate": "Basic"})
     allowed_pairs = [
         (os.environ.get("ADMIN_USERNAME", ""), os.environ.get("ADMIN_PASSWORD", "")),
         (os.environ.get("PIMPINAN_USERNAME", ""), os.environ.get("PIMPINAN_PASSWORD", "")),
