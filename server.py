@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.12-member-data-labels",
+    version="3.13.14-member-recap-header-back-link",
 )
 
 app.add_middleware(
@@ -4399,7 +4399,7 @@ def _member_recap_rows(scope_role: str, identity: dict | None = None, q: str = "
     return result
 
 
-def _member_recap_html(rows, title, scope_text, base_path, q=""):
+def _member_recap_html(rows, title, scope_text, base_path, q="", dashboard_url="/"):
     cards=[]
     for r in rows:
         face = (f"<a href='{_lead_e(r['profile_photo_url'])}' target='_blank' rel='noopener'><img class='recap-photo' src='{_lead_e(r['profile_photo_url'])}' alt='Foto diri'></a>" if r.get('profile_photo_url') else "<div class='recap-missing'>Foto diri<br>Belum tersedia</div>")
@@ -4417,16 +4417,16 @@ def _member_recap_html(rows, title, scope_text, base_path, q=""):
     if not cards:
         cards=["<div class='empty'>Belum ada data anggota pada cakupan ini.</div>"]
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{_lead_e(title)}</title><style>
-*{{box-sizing:border-box}}body{{margin:0;background:#f3efea;color:#2c2222;font:14px/1.45 Arial, sans-serif}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:#fff;padding:18px 22px;border-bottom:4px solid #d8b15a}}header h1{{margin:0;color:#f4d58a;font-size:23px}}header p{{margin:4px 0 0}}main{{max-width:1200px;margin:20px auto;padding:0 16px}}.toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;padding:14px;border:1px solid #e4d9d0;border-radius:10px;margin-bottom:14px}}input{{padding:10px;border:1px solid #cbbdb4;border-radius:7px;min-width:240px;font:inherit}}button,.btn{{display:inline-block;padding:10px 13px;background:#5b1018;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:700;cursor:pointer}}.btn.gold{{background:#d8b15a;color:#31090e}}.member-row{{display:grid;grid-template-columns:minmax(130px,18%) minmax(150px,21%) minmax(0,61%);gap:14px;background:#fff;border:1px solid #dfd4cc;border-left:5px solid #d8b15a;border-radius:10px;padding:14px;margin:12px 0;break-inside:avoid;page-break-inside:avoid;align-items:start}}.photo-cell{{min-width:0;text-align:center}}.photo-label{{font-size:11px;font-weight:800;letter-spacing:.7px;color:#6b1920;margin:0 0 7px}}.recap-photo{{display:block;width:100%;height:145px;object-fit:contain;background:#f7f5f2;border:1px solid #ddd;border-radius:6px}}.recap-photo.ktp{{height:145px}}.recap-missing{{height:145px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;border:1px dashed #b9aaa0;border-radius:6px;color:#897c75;background:#faf8f6;font-size:12px}}.identity-cell{{min-width:0;overflow-wrap:anywhere}}.identity-cell h3{{margin:0 0 8px;color:#5b1018;font-size:17px}}.detail-line{{display:grid;grid-template-columns:minmax(125px,30%) minmax(0,70%);gap:8px;padding:4px 0;border-bottom:1px solid #eee7e1}}.detail-line b{{color:#6a4b43;font-size:12px}}.detail-line span{{min-width:0;overflow-wrap:anywhere}}.member-row .identity-cell,.member-row .identity-cell h3,.member-row .detail-line,.member-row .detail-line b,.member-row .detail-line span{{color:#5b1018!important}}.muted{{color:#70645e;font-size:12px}}.empty{{background:white;padding:28px;text-align:center;border-radius:9px}}footer{{text-align:center;color:#756963;padding:18px;font-size:11px}}
+*{{box-sizing:border-box}}body{{margin:0;background:#f3efea;color:#2c2222;font:14px/1.45 Arial, sans-serif}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:#fff;padding:18px 22px;border-bottom:4px solid #d8b15a}}header h1{{margin:0;color:#f4d58a;font-size:23px}}header p{{margin:4px 0 0}}.header-inner{{max-width:1200px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}}.header-back{{display:inline-block;padding:10px 14px;background:#d8b15a;color:#31090e;border:1px solid #f4d58a;border-radius:7px;text-decoration:none;font-weight:800;white-space:nowrap}}main{{max-width:1200px;margin:20px auto;padding:0 16px}}.toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;padding:14px;border:1px solid #e4d9d0;border-radius:10px;margin-bottom:14px}}input{{padding:10px;border:1px solid #cbbdb4;border-radius:7px;min-width:240px;font:inherit}}button,.btn{{display:inline-block;padding:10px 13px;background:#5b1018;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:700;cursor:pointer}}.toolbar-actions{{display:flex;gap:8px;align-items:center;flex-wrap:wrap}}.btn.back{{background:#31090e;color:#f4d58a;border:1px solid #d8b15a}}.btn.gold{{background:#d8b15a;color:#31090e}}.member-row{{display:grid;grid-template-columns:minmax(130px,18%) minmax(150px,21%) minmax(0,61%);gap:14px;background:#fff;border:1px solid #dfd4cc;border-left:5px solid #d8b15a;border-radius:10px;padding:14px;margin:12px 0;break-inside:avoid;page-break-inside:avoid;align-items:start}}.photo-cell{{min-width:0;text-align:center}}.photo-label{{font-size:11px;font-weight:800;letter-spacing:.7px;color:#6b1920;margin:0 0 7px}}.recap-photo{{display:block;width:100%;height:145px;object-fit:contain;background:#f7f5f2;border:1px solid #ddd;border-radius:6px}}.recap-photo.ktp{{height:145px}}.recap-missing{{height:145px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;border:1px dashed #b9aaa0;border-radius:6px;color:#897c75;background:#faf8f6;font-size:12px}}.identity-cell{{min-width:0;overflow-wrap:anywhere}}.identity-cell h3{{margin:0 0 8px;color:#5b1018;font-size:17px}}.detail-line{{display:grid;grid-template-columns:minmax(125px,30%) minmax(0,70%);gap:8px;padding:4px 0;border-bottom:1px solid #eee7e1}}.detail-line b{{color:#6a4b43;font-size:12px}}.detail-line span{{min-width:0;overflow-wrap:anywhere}}.member-row .identity-cell,.member-row .identity-cell h3,.member-row .detail-line,.member-row .detail-line b,.member-row .detail-line span{{color:#5b1018!important}}.muted{{color:#70645e;font-size:12px}}.empty{{background:white;padding:28px;text-align:center;border-radius:9px}}footer{{text-align:center;color:#756963;padding:18px;font-size:11px}}
 @media(max-width:700px){{.member-row{{grid-template-columns:1fr 1fr;gap:10px}}.identity-cell{{grid-column:1/-1}}.recap-photo,.recap-missing{{height:130px}}}}
 @page{{size:A4 landscape;margin:9mm}}@media print{{body{{background:#fff;font-size:9pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}}header{{padding:7mm 8mm}}header h1{{font-size:16pt}}main{{max-width:none;margin:4mm 0;padding:0}}.toolbar,.no-print,footer{{display:none!important}}.member-row{{grid-template-columns:21% 23% 56%;gap:3mm;padding:3mm;margin:0 0 3mm;border-radius:0;box-shadow:none;border:0;border-bottom:1px solid #b9aaa0;break-inside:avoid;page-break-inside:avoid}}.recap-photo,.recap-missing{{height:34mm;max-height:34mm}}.photo-label{{font-size:7pt}}.identity-cell h3{{font-size:11pt;margin-bottom:2mm}}.detail-line{{grid-template-columns:30% 70%;gap:2mm;padding:1mm 0;font-size:8pt}}.detail-line b{{font-size:7.5pt}}}}
-</style></head><body><header><h1>{_lead_e(title)}</h1><p>{_lead_e(scope_text)} · Jumlah anggota: {len(rows)}</p></header><main><div class='toolbar no-print'><form method='get' action='{base_path}'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, jabatan, wilayah'><button type='submit'>Cari</button></form><div><a class='btn gold' href='{base_path}/export/pdf?q={quote(q)}'>PDF A4</a> <a class='btn gold' href='{base_path}/export/excel?q={quote(q)}'>Excel</a> <button onclick='window.print()'>Cetak A4</button></div></div>{''.join(cards)}</main><footer>Ikatan Persaudaraan Triple 555 · Dokumen internal organisasi</footer></body></html>"""
+</style></head><body><header><div class='header-inner'><div><h1>{_lead_e(title)}</h1><p>{_lead_e(scope_text)} · Jumlah anggota: {len(rows)}</p></div><a class='header-back no-print' href='{_lead_e(dashboard_url)}'>← Kembali ke Dashboard Utama</a></div></header><main><div class='toolbar no-print'><form method='get' action='{base_path}'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, jabatan, wilayah'><button type='submit'>Cari</button></form><div class='toolbar-actions'><a class='btn back' href='{_lead_e(dashboard_url)}'>← Kembali ke Dashboard Utama</a> <a class='btn gold' href='{base_path}/export/pdf?q={quote(q)}'>PDF A4</a> <a class='btn gold' href='{base_path}/export/excel?q={quote(q)}'>Excel</a> <button onclick='window.print()'>Cetak A4</button></div></div>{''.join(cards)}</main><footer>Ikatan Persaudaraan Triple 555 · Dokumen internal organisasi</footer></body></html>"""
 
 
 @app.get("/pimpinan/personel", response_class=HTMLResponse)
 def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
     rows = _member_recap_rows("PIMPINAN", None, q)
-    return HTMLResponse(_member_recap_html(rows, "Data Anggota 555", "Cakupan nasional · Seluruh anggota", "/pimpinan/personel", q))
+    return HTMLResponse(_member_recap_html(rows, "Data Anggota 555", "Cakupan nasional · Seluruh anggota", "/pimpinan/personel", q, "/pimpinan"))
 
 
 @app.get("/dpd/anggota", response_class=HTMLResponse)
@@ -4434,7 +4434,7 @@ def dpd_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpd
     rows = _member_recap_rows("DPD", identity, q)
     scope = "Seluruh kabupaten/kota di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh kabupaten/kota di Provinsi {identity.get('scope_province','')}"
     title = "Rekap Anggota Seluruh Kabupaten/Kota" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kabupaten/Kota Provinsi {identity.get('scope_province','')}"
-    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpd/anggota", q))
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpd/anggota", q, "/superuser/dashboard" if identity.get("role") == "SUPERUSER" else "/dpd/dashboard"))
 
 
 @app.get("/dpc/anggota", response_class=HTMLResponse)
@@ -4442,7 +4442,7 @@ def dpc_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpc
     rows = _member_recap_rows("DPC", identity, q)
     scope = "Seluruh kecamatan di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh kecamatan di {identity.get('scope_regency','')}, {identity.get('scope_province','')}"
     title = "Rekap Anggota Seluruh Kecamatan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kecamatan {identity.get('scope_regency','')}"
-    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpc/anggota", q))
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpc/anggota", q, "/superuser/dashboard" if identity.get("role") == "SUPERUSER" else "/dpc/dashboard"))
 
 
 @app.get("/dps/anggota", response_class=HTMLResponse)
@@ -4450,7 +4450,7 @@ def dps_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dps
     rows = _member_recap_rows("DPS", identity, q)
     scope = "Seluruh desa/kelurahan di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh desa/kelurahan di Kecamatan {identity.get('scope_district','')}, {identity.get('scope_regency','')}, {identity.get('scope_province','')}"
     title = "Rekap Anggota Seluruh Desa/Kelurahan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Desa/Kelurahan Kecamatan {identity.get('scope_district','')}"
-    return HTMLResponse(_member_recap_html(rows, title, scope, "/dps/anggota", q))
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dps/anggota", q, "/superuser/dashboard" if identity.get("role") == "SUPERUSER" else "/dps/dashboard/pendaftaran-anggota"))
 
 
 def _member_recap_export_excel(rows, filename, title="Rekap Anggota"):
