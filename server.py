@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.8-superuser-global-dashboard-access",
+    version="3.13.9-member-recap-a4-export",
 )
 
 app.add_middleware(
@@ -2156,7 +2156,7 @@ def _monitoring_dashboard_html(role: str, identity: dict):
     html = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
     <title>{title} | SIDPS 555</title><meta http-equiv='refresh' content='60'><style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:14px/1.5 system-ui,Arial}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:white;padding:22px;border-bottom:3px solid #d8b15a}}main{{max-width:1150px;margin:auto;padding:20px}}.scope{{color:#f1d99c}}.grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0}}.card,.panel{{background:white;border:1px solid #e8ded8;border-radius:12px;padding:16px;box-shadow:0 4px 14px #31090e0b}}.card small{{color:#766b67}}.num{{font-size:27px;font-weight:800;color:#5b1018}}.panel{{margin:14px 0;overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:11px;border-bottom:1px solid #eee4dd;text-align:left}}th{{background:#f8f2e9;color:#5b1018}}.bar{{height:13px;background:#eee4dd;border-radius:20px;overflow:hidden}}.bar span{{display:block;height:100%;background:#b88a2e;width:{target['percentage']}%}}button{{border:0;background:#d8b15a;color:#31090e;padding:10px 15px;border-radius:8px;font-weight:800;cursor:pointer}}.top{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}}@media(max-width:800px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}main{{padding:12px}}}}
-    </style></head><body><header><div class='top'><div><h1 style='margin:0'>{title}</h1><div class='scope'>Cakupan resmi: {escape(scope_text)}</div><div>Monitoring anggota · {'Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Akses hanya-baca'}</div></div><div style='display:flex;gap:8px;align-items:center'><a href='/superuser/dashboard' style='color:#f1d99c;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a><form method='post' action='{logout_path}'><button type='submit'>Keluar</button></form></div></div></header><main>
+    </style></head><body><header><div class='top'><div><h1 style='margin:0'>{title}</h1><div class='scope'>Cakupan resmi: {escape(scope_text)}</div><div>Monitoring anggota · {'Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Akses hanya-baca'}</div></div><div style='display:flex;gap:8px;align-items:center'><a href='{'/dpc/anggota' if role == 'DPC' else '/dpd/anggota'}' style='color:#f1d99c;text-decoration:none;font-weight:800'>Rekap Anggota</a><a href='/superuser/dashboard' style='color:#f1d99c;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a><form method='post' action='{logout_path}'><button type='submit'>Keluar</button></form></div></div></header><main>
     <section class='grid'>
       <div class='card'><small>Anggota terdaftar</small><div class='num'>{summary['registered']}</div></div>
       <div class='card'><small>Terverifikasi</small><div class='num'>{summary['verified']}</div></div>
@@ -2164,7 +2164,7 @@ def _monitoring_dashboard_html(role: str, identity: dict):
       <div class='card'><small>Perlu perbaikan</small><div class='num'>{summary['revision']}</div></div>
       <div class='card'><small>Ditolak</small><div class='num'>{summary['rejected']}</div></div>
     </section>
-    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Target Provinsi Riau 8.000 anggota terverifikasi</h2>
+    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Target nasional 8.000 anggota terverifikasi</h2>
       <div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><b>{target['verified']:,} terverifikasi</b><b>{target['target']:,} target · {target['percentage']}%</b></div>
       <div class='bar' style='margin:10px 0'><span></span></div>
       <small>Angka target merupakan rekap nasional agregat. Dashboard ini tidak menampilkan identitas anggota di luar cakupan wilayah.</small>
@@ -3154,7 +3154,7 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
 @media(max-width:1200px){{.stats{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:800px){{.layout{{grid-template-columns:1fr;padding:14px}}.sidebar{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.sidebar .side-label{{display:none}}.sidebar a{{flex:0 0 auto}}}}@media(max-width:620px){{.hero{{padding:15px}}.brand img{{width:54px;height:54px}}.stats{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.stat{{padding:12px}}.stat strong{{font-size:23px}}.menu{{grid-template-columns:1fr}}.card{{padding:14px}}.layout{{padding:10px}}}}
 </style></head><body><main class='wrap'>
 <header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>555 · ADMIN CONTROL CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Pusat administrasi organisasi</p></div></div><div class='user'>Administrator: <b>{escape(username)}</b></div></header>
-<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Data Personel</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin/cakupan-wilayah'>⌖ &nbsp; Cakupan Wilayah</a><a href='/admin/master-data-wilayah'>▦ &nbsp; Master Data Wilayah</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
+<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Rekap Anggota</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin/cakupan-wilayah'>⌖ &nbsp; Cakupan Wilayah</a><a href='/admin/master-data-wilayah'>▦ &nbsp; Master Data Wilayah</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
 <h2 class='section-title'>Ringkasan Sistem</h2>
 <section class='stats'>
 <div class='stat'><span>Total Pendaftaran Anggota</span><strong>{stat('registrations_total')}</strong><small>Seluruh status</small></div>
@@ -3737,7 +3737,7 @@ main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
 .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#211518;border:1px solid #5b3939;border-left:4px solid var(--gold);border-radius:13px;padding:14px}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#302225}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:#b8a8a0;font-size:11px}}.person-info h3{{margin:0 0 3px;color:#f1cb72}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#174d32;color:#a7efbf}}.status.inactive{{background:#604316;color:#ffdf8a}}footer{{text-align:center;color:#988780;font-size:12px;padding:20px}}
 @media(max-width:900px){{.shell{{grid-template-columns:1fr;padding:14px}}.nav{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.nav:before{{display:none}}.nav a{{flex:0 0 auto}}}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}.shell{{padding:10px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Personel</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Rekap Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
@@ -4348,39 +4348,195 @@ def admin_review_member_registration(
     return RedirectResponse(url="/admin/pendaftaran-anggota?status="+new_status, status_code=303)
 
 
+# =========================================================
+# REKAP ANGGOTA TERPADU: PIMPINAN, DPD, DPC + CETAK / EKSPOR
+# =========================================================
+
+def _member_recap_rows(scope_role: str, identity: dict | None = None, q: str = ""):
+    """Satu sumber data dari pendaftaran anggota; filter wilayah diterapkan di SQL."""
+    where = ["1=1"]
+    params = []
+    if scope_role in ("DPD", "DPC") and (identity or {}).get("role") != "SUPERUSER":
+        province = re.sub(r'^(provinsi|prov[.]?)\s+', '', _normalize_region_name((identity or {}).get("scope_province")))
+        regency = _normalize_region_name((identity or {}).get("scope_regency"))
+        if not province:
+            raise HTTPException(status_code=403, detail="Cakupan provinsi akun belum lengkap.")
+        where.append("lower(trim(regexp_replace(regexp_replace(coalesce(r.province_name,''),'^(provinsi|prov[.]?)[[:space:]]+','','i'),'[[:space:]]+',' ','g')))=%s")
+        params.append(province)
+        if scope_role == "DPC":
+            if not regency:
+                raise HTTPException(status_code=403, detail="Cakupan kabupaten/kota akun belum lengkap.")
+            where.append("lower(trim(regexp_replace(regexp_replace(coalesce(r.regency_name,''),'^(kabupaten|kab[.]?|kota)[[:space:]]+','','i'),'[[:space:]]+',' ','g')))=%s")
+            params.append(regency)
+    if q.strip():
+        where.append("(r.full_name ILIKE %s OR r.nik ILIKE %s OR r.phone ILIKE %s OR r.org_position ILIKE %s OR r.address ILIKE %s OR r.village_name ILIKE %s OR r.district_name ILIKE %s OR r.regency_name ILIKE %s OR r.province_name ILIKE %s)")
+        params.extend([f"%{q.strip()}%"] * 9)
+    sql = f"""
+        SELECT r.id, r.registration_code, r.member_code, r.full_name, r.nik,
+               r.birth_place, r.birth_date, r.gender, r.address, r.phone, r.email,
+               r.org_level, r.org_position, r.region, r.province_name, r.regency_name,
+               r.district_name, r.village_name, r.status, r.admin_note,
+               r.profile_photo_path, r.ktp_path, r.created_at
+        FROM organization_member_registrations r
+        WHERE {' AND '.join(where)}
+        ORDER BY lower(coalesce(r.province_name,'')), lower(coalesce(r.regency_name,'')),
+                 lower(coalesce(r.district_name,'')), lower(r.full_name)
+    """
+    with get_db() as connection:
+        rows = connection.execute(sql, tuple(params)).fetchall()
+    result=[]
+    for row in rows:
+        item=dict(row)
+        item['profile_photo_url'] = create_supabase_signed_url(item.get('profile_photo_path') or '', 1800, _officer_private_bucket()) if item.get('profile_photo_path') else None
+        item['ktp_url'] = create_supabase_signed_url(item.get('ktp_path') or '', 1800, _officer_private_bucket()) if item.get('ktp_path') else None
+        result.append(item)
+    return result
+
+
+def _member_recap_html(rows, title, scope_text, base_path, q=""):
+    cards=[]
+    for r in rows:
+        face = (f"<a href='{_lead_e(r['profile_photo_url'])}' target='_blank' rel='noopener'><img class='recap-photo' src='{_lead_e(r['profile_photo_url'])}' alt='Foto diri'></a>" if r.get('profile_photo_url') else "<div class='recap-missing'>Foto diri<br>Belum tersedia</div>")
+        ktp = (f"<a href='{_lead_e(r['ktp_url'])}' target='_blank' rel='noopener'><img class='recap-photo ktp' src='{_lead_e(r['ktp_url'])}' alt='Foto KTP'></a>" if r.get('ktp_url') else "<div class='recap-missing ktp'>Foto KTP<br>Belum tersedia</div>")
+        area = ", ".join(x for x in [r.get('village_name'),r.get('district_name'),r.get('regency_name'),r.get('province_name')] if x) or r.get('region') or '-'
+        details = [
+            ('Nama lengkap',r.get('full_name')),('ID anggota',r.get('member_code') or r.get('registration_code')),
+            ('Jabatan',r.get('org_position') or '-'),('Tingkat organisasi',r.get('org_level') or '-'),
+            ('NIK',r.get('nik')),('Tempat, tanggal lahir',f"{r.get('birth_place') or '-'}, {r.get('birth_date') or '-'}"),
+            ('Jenis kelamin',r.get('gender')),('Alamat',r.get('address')),('Wilayah',area),
+            ('Nomor HP',r.get('phone')),('Email',r.get('email')),('Status pendaftaran',str(r.get('status') or '-').upper()),
+        ]
+        detail_html=''.join(f"<div class='detail-line'><b>{_lead_e(label)}</b><span>{_lead_e(value or '-')}</span></div>" for label,value in details)
+        cards.append(f"<article class='member-row'><div class='photo-cell'><div class='photo-label'>FOTO DIRI</div>{face}</div><div class='photo-cell'><div class='photo-label'>FOTO KTP</div>{ktp}</div><div class='identity-cell'><h3>{_lead_e(r.get('full_name'))}</h3>{detail_html}</div></article>")
+    if not cards:
+        cards=["<div class='empty'>Belum ada data anggota pada cakupan ini.</div>"]
+    return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{_lead_e(title)}</title><style>
+*{{box-sizing:border-box}}body{{margin:0;background:#f3efea;color:#2c2222;font:14px/1.45 Arial, sans-serif}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:#fff;padding:18px 22px;border-bottom:4px solid #d8b15a}}header h1{{margin:0;color:#f4d58a;font-size:23px}}header p{{margin:4px 0 0}}main{{max-width:1200px;margin:20px auto;padding:0 16px}}.toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;padding:14px;border:1px solid #e4d9d0;border-radius:10px;margin-bottom:14px}}input{{padding:10px;border:1px solid #cbbdb4;border-radius:7px;min-width:240px;font:inherit}}button,.btn{{display:inline-block;padding:10px 13px;background:#5b1018;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:700;cursor:pointer}}.btn.gold{{background:#d8b15a;color:#31090e}}.member-row{{display:grid;grid-template-columns:minmax(130px,18%) minmax(150px,21%) minmax(0,61%);gap:14px;background:#fff;border:1px solid #dfd4cc;border-left:5px solid #d8b15a;border-radius:10px;padding:14px;margin:12px 0;break-inside:avoid;page-break-inside:avoid;align-items:start}}.photo-cell{{min-width:0;text-align:center}}.photo-label{{font-size:11px;font-weight:800;letter-spacing:.7px;color:#6b1920;margin:0 0 7px}}.recap-photo{{display:block;width:100%;height:145px;object-fit:contain;background:#f7f5f2;border:1px solid #ddd;border-radius:6px}}.recap-photo.ktp{{height:145px}}.recap-missing{{height:145px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;border:1px dashed #b9aaa0;border-radius:6px;color:#897c75;background:#faf8f6;font-size:12px}}.identity-cell{{min-width:0;overflow-wrap:anywhere}}.identity-cell h3{{margin:0 0 8px;color:#5b1018;font-size:17px}}.detail-line{{display:grid;grid-template-columns:minmax(125px,30%) minmax(0,70%);gap:8px;padding:4px 0;border-bottom:1px solid #eee7e1}}.detail-line b{{color:#6a4b43;font-size:12px}}.detail-line span{{min-width:0;overflow-wrap:anywhere}}.muted{{color:#70645e;font-size:12px}}.empty{{background:white;padding:28px;text-align:center;border-radius:9px}}footer{{text-align:center;color:#756963;padding:18px;font-size:11px}}
+@media(max-width:700px){{.member-row{{grid-template-columns:1fr 1fr;gap:10px}}.identity-cell{{grid-column:1/-1}}.recap-photo,.recap-missing{{height:130px}}}}
+@page{{size:A4 landscape;margin:9mm}}@media print{{body{{background:#fff;font-size:9pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}}header{{padding:7mm 8mm}}header h1{{font-size:16pt}}main{{max-width:none;margin:4mm 0;padding:0}}.toolbar,.no-print,footer{{display:none!important}}.member-row{{grid-template-columns:21% 23% 56%;gap:3mm;padding:3mm;margin:0 0 3mm;border-radius:0;box-shadow:none;border:0;border-bottom:1px solid #b9aaa0;break-inside:avoid;page-break-inside:avoid}}.recap-photo,.recap-missing{{height:34mm;max-height:34mm}}.photo-label{{font-size:7pt}}.identity-cell h3{{font-size:11pt;margin-bottom:2mm}}.detail-line{{grid-template-columns:30% 70%;gap:2mm;padding:1mm 0;font-size:8pt}}.detail-line b{{font-size:7.5pt}}}}
+</style></head><body><header><h1>{_lead_e(title)}</h1><p>{_lead_e(scope_text)} · Jumlah anggota: {len(rows)}</p></header><main><div class='toolbar no-print'><form method='get' action='{base_path}'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, jabatan, wilayah'><button type='submit'>Cari</button></form><div><a class='btn gold' href='{base_path}/export/pdf?q={quote(q)}'>PDF A4</a> <a class='btn gold' href='{base_path}/export/excel?q={quote(q)}'>Excel</a> <button onclick='window.print()'>Cetak A4</button></div></div>{''.join(cards)}</main><footer>Ikatan Persaudaraan Triple 555 · Dokumen internal organisasi</footer></body></html>"""
+
+
 @app.get("/pimpinan/personel", response_class=HTMLResponse)
 def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
-    with get_db() as connection:
-        rows = connection.execute("""
-            SELECT r.id, r.full_name, r.registration_code, r.org_level, r.org_position,
-                   r.region, r.phone, r.profile_photo_path, r.linked_member_id,
-                   o.active AS account_active, v.village_name
-            FROM organization_member_registrations r
-            LEFT JOIN officers o ON o.member_id=r.linked_member_id
-            LEFT JOIN villages v ON v.id=r.village_id
-            WHERE r.status='approved'
-              AND (%s='' OR r.full_name ILIKE %s OR r.nik ILIKE %s
-                   OR r.phone ILIKE %s OR r.org_position ILIKE %s
-                   OR r.region ILIKE %s OR COALESCE(v.village_name,'') ILIKE %s)
-            ORDER BY r.org_level, r.region, r.full_name
-        """, (q.strip(), f"%{q.strip()}%", f"%{q.strip()}%", f"%{q.strip()}%",
-              f"%{q.strip()}%", f"%{q.strip()}%", f"%{q.strip()}%")).fetchall()
-    cards = []
+    rows = _member_recap_rows("PIMPINAN", None, q)
+    return HTMLResponse(_member_recap_html(rows, "Rekap Seluruh Anggota 555", "Cakupan nasional", "/pimpinan/personel", q))
+
+
+@app.get("/dpd/anggota", response_class=HTMLResponse)
+def dpd_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
+    rows = _member_recap_rows("DPD", identity, q)
+    scope = "Seluruh Provinsi" if identity.get('role') == 'SUPERUSER' else f"Provinsi {identity.get('scope_province','')}"
+    return HTMLResponse(_member_recap_html(rows, "Rekap Anggota DPD", scope, "/dpd/anggota", q))
+
+
+@app.get("/dpc/anggota", response_class=HTMLResponse)
+def dpc_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
+    rows = _member_recap_rows("DPC", identity, q)
+    scope = "Seluruh wilayah" if identity.get('role') == 'SUPERUSER' else f"{identity.get('scope_regency','')}, {identity.get('scope_province','')}"
+    return HTMLResponse(_member_recap_html(rows, "Rekap Anggota DPC", scope, "/dpc/anggota", q))
+
+
+def _member_recap_export_excel(rows, filename):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.drawing.image import Image as XLImage
+    from io import BytesIO as _BytesIO
+    from PIL import Image as PILImage
+    wb=Workbook(); ws=wb.active; ws.title="Rekap Anggota"
+    ws.append(["Foto Diri","Foto KTP","Keterangan Identitas"])
+    for c in ws[1]:
+        c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="5B1018"); c.alignment=Alignment(horizontal="center",vertical="center")
+    ws.column_dimensions['A'].width=24; ws.column_dimensions['B'].width=30; ws.column_dimensions['C'].width=78; ws.row_dimensions[1].height=24
+    thin=Side(style="thin",color="D8C9BE")
+    for idx,r in enumerate(rows, start=2):
+        area=", ".join(x for x in [r.get('village_name'),r.get('district_name'),r.get('regency_name'),r.get('province_name')] if x) or r.get('region') or '-'
+        detail="\n".join([f"Nama lengkap: {r.get('full_name') or '-'}",f"ID anggota: {r.get('member_code') or r.get('registration_code') or '-'}",f"Jabatan: {r.get('org_position') or '-'}",f"Tingkat organisasi: {r.get('org_level') or '-'}",f"NIK: {r.get('nik') or '-'}",f"Tempat/tanggal lahir: {r.get('birth_place') or '-'}, {r.get('birth_date') or '-'}",f"Jenis kelamin: {r.get('gender') or '-'}",f"Alamat: {r.get('address') or '-'}",f"Wilayah: {area}",f"Nomor HP: {r.get('phone') or '-'}",f"Email: {r.get('email') or '-'}",f"Status: {r.get('status') or '-'}"])
+        ws.cell(idx,3,detail).alignment=Alignment(wrap_text=True,vertical="top")
+        ws.cell(idx,3).border=Border(bottom=thin)
+        ws.cell(idx,1,"Belum tersedia" if not r.get('profile_photo_url') else "")
+        ws.cell(idx,2,"Belum tersedia" if not r.get('ktp_url') else "")
+        for col,key in [(1,'profile_photo_url'),(2,'ktp_url')]:
+            url=r.get(key)
+            if url:
+                try:
+                    req=urllib.request.Request(url,headers={"User-Agent":"SIDPS-Export/1.0"})
+                    with urllib.request.urlopen(req,timeout=20) as resp: raw=resp.read()
+                    im=PILImage.open(_BytesIO(raw)); im.load()
+                    if im.mode not in ("RGB","RGBA"): im=im.convert("RGB")
+                    image_buffer=_BytesIO(); im.save(image_buffer,format="PNG"); image_buffer.seek(0)
+                    xl=XLImage(image_buffer)
+                    # Fit within fixed photo cell without distorting aspect ratio.
+                    ratio=min(175/xl.width,110/xl.height,1.0); xl.width*=ratio; xl.height*=ratio
+                    ws.add_image(xl,f"{chr(64+col)}{idx}")
+                except Exception:
+                    ws.cell(idx,col,"Dokumen tidak dapat dimuat")
+        estimated_lines=sum(max(1, (len(line)+84)//85) for line in detail.splitlines())
+        ws.row_dimensions[idx].height=max(90,min(420,estimated_lines*12+8))
+        for c in ws[idx]: c.alignment=Alignment(wrap_text=True,vertical="top"); c.border=Border(bottom=thin)
+    ws.freeze_panes="A2"; ws.sheet_view.showGridLines=False
+    out=BytesIO(); wb.save(out); out.seek(0)
+    return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename={filename}"})
+
+
+def _member_recap_export_pdf(rows, filename, title):
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image as PDFImage, Spacer
+    from reportlab.lib.utils import ImageReader
+    from io import BytesIO as _BytesIO
+    from xml.sax.saxutils import escape as xml_escape
+    out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=landscape(A4),rightMargin=18,leftMargin=18,topMargin=18,bottomMargin=18,title=title)
+    styles=getSampleStyleSheet(); styles.add(ParagraphStyle(name="MemberCell",parent=styles["BodyText"],fontName="Helvetica",fontSize=7.2,leading=9,spaceAfter=1,wordWrap="CJK")); styles.add(ParagraphStyle(name="MemberHead",parent=styles["BodyText"],fontName="Helvetica-Bold",fontSize=8,textColor=colors.white,leading=9,alignment=1))
+    story=[Paragraph(xml_escape(title),styles["Title"]),Paragraph(f"Jumlah anggota: {len(rows)}",styles["Normal"]),Spacer(1,8)]
+    data=[[Paragraph("FOTO DIRI",styles["MemberHead"]),Paragraph("FOTO KTP",styles["MemberHead"]),Paragraph("KETERANGAN IDENTITAS",styles["MemberHead"])]]
     for r in rows:
-        photo = create_supabase_signed_url(r["profile_photo_path"], expires_in=1800, bucket=_officer_private_bucket()) if r["profile_photo_path"] else None
-        avatar = f"<img class='person-photo' src='{_lead_e(photo)}' alt='Foto {_lead_e(r['full_name'])}'>" if photo else "<div class='person-photo no-photo'>Foto<br>belum ada</div>"
-        territory = r["village_name"] or r["region"] or "-"
-        if not r["linked_member_id"]:
-            access = "<span class='status inactive'>BELUM DIBERI AKSES</span>"
-        elif r["account_active"] == 1:
-            access = "<span class='status active'>AKSES AKTIF</span>"
-        else:
-            access = "<span class='status inactive'>AKSES NONAKTIF</span>"
-        cards.append(f"<article class='person-card'>{avatar}<div class='person-info'><h3>{_lead_e(r['full_name'])}</h3><div class='muted'>{_lead_e(r['org_level'])} · {_lead_e(r['org_position'])}</div><p>☎ {_lead_e(r['phone'] or 'Nomor HP belum diisi')}</p><p>⌖ {_lead_e(territory)}</p>{access}</div></article>")
-    if not cards:
-        cards = ["<div class='panel'>Belum ada anggota dengan pendaftaran berstatus Disetujui.</div>"]
-    content = f"""<section class='panel'><form method='get'><label>Cari anggota</label><input name='q' value='{_lead_e(q)}' placeholder='Nama, nomor HP, jabatan, wilayah'><button type='submit'>Cari</button> <a class='btn light' href='/pimpinan/personel'>Reset</a></form><p class='muted'>Menampilkan {len(rows)} anggota yang pendaftarannya sudah disetujui. Status akses aplikasi ditampilkan terpisah dari status keanggotaan.</p><p><a class='btn' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a></p></section><section class='people-grid'>{''.join(cards)}</section>"""
-    return HTMLResponse(_lead_page("Data Anggota Terverifikasi", username, content))
+        cells=[]
+        for url,label in [(r.get('profile_photo_url'),'Foto diri belum tersedia'),(r.get('ktp_url'),'Foto KTP belum tersedia')]:
+            if url:
+                try:
+                    req=urllib.request.Request(url,headers={"User-Agent":"SIDPS-PDF/1.0"})
+                    with urllib.request.urlopen(req,timeout=20) as resp: raw=resp.read()
+                    img=PDFImage(_BytesIO(raw),width=105,height=78,kind='proportional')
+                    cells.append(img)
+                except Exception: cells.append(Paragraph("Dokumen tidak dapat dimuat",styles["MemberCell"]))
+            else: cells.append(Paragraph(label,styles["MemberCell"]))
+        area=", ".join(x for x in [r.get('village_name'),r.get('district_name'),r.get('regency_name'),r.get('province_name')] if x) or r.get('region') or '-'
+        lines=[("Nama lengkap",r.get('full_name')),('ID anggota',r.get('member_code') or r.get('registration_code')),('Jabatan',r.get('org_position')),('Tingkat organisasi',r.get('org_level')),('NIK',r.get('nik')),('Tempat/tanggal lahir',f"{r.get('birth_place') or '-'}, {r.get('birth_date') or '-'}"),('Jenis kelamin',r.get('gender')),('Alamat',r.get('address')),('Wilayah',area),('Nomor HP',r.get('phone')),('Email',r.get('email')),('Status pendaftaran',r.get('status'))]
+        detail="<br/>".join(f"<b>{xml_escape(str(k))}:</b> {xml_escape(str(v or '-'))}" for k,v in lines)
+        cells.append(Paragraph(detail,styles["MemberCell"]))
+        data.append(cells)
+    widths=[125,145,536]
+    table=Table(data,colWidths=widths,repeatRows=1,hAlign="LEFT",splitByRow=1,splitInRow=1)
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor('#5B1018')),("GRID",(0,0),(-1,-1),0.4,colors.HexColor('#CBBDB4')),("VALIGN",(0,0),(-1,-1),'TOP'),("ALIGN",(0,0),(1,-1),'CENTER'),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor('#F8F4EF')])]))
+    story.append(table); doc.build(story); out.seek(0)
+    return StreamingResponse(out,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename={filename}"})
+
+
+@app.get("/pimpinan/personel/export/excel")
+def pimpinan_rekap_anggota_excel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
+    return _member_recap_export_excel(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.xlsx")
+
+@app.get("/pimpinan/personel/export/pdf")
+def pimpinan_rekap_anggota_pdf(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
+    return _member_recap_export_pdf(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.pdf","Rekap Seluruh Anggota 555")
+
+@app.get("/dpd/anggota/export/excel")
+def dpd_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
+    return _member_recap_export_excel(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.xlsx")
+
+@app.get("/dpd/anggota/export/pdf")
+def dpd_rekap_anggota_pdf(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
+    return _member_recap_export_pdf(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.pdf","Rekap Anggota DPD")
+
+@app.get("/dpc/anggota/export/excel")
+def dpc_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
+    return _member_recap_export_excel(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.xlsx")
+
+@app.get("/dpc/anggota/export/pdf")
+def dpc_rekap_anggota_pdf(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
+    return _member_recap_export_pdf(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.pdf","Rekap Anggota DPC")
 
 
 def _lead_map_embed(surveys, verifications, map_id="lead-dashboard-map"):
