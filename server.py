@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.7-dpc-multi-account-json",
+    version="3.13.8-superuser-global-dashboard-access",
 )
 
 app.add_middleware(
@@ -2230,6 +2230,21 @@ def _browser_role_login(role: str, member_id: str, password: str, request: Reque
         raise HTTPException(status_code=400, detail="Role login wilayah tidak dikenal.")
 
     submitted_username = member_id.strip()
+
+    # SUPERUSER boleh masuk melalui formulir DPD/DPC juga. Kredensialnya tetap
+    # diverifikasi terhadap SUPERUSER_USERNAME/PASSWORD, lalu diterbitkan sesi
+    # global SUPERUSER (bukan sesi DPD/DPC dan tidak diberi cakupan wilayah).
+    submitted_superuser = HTTPBasicCredentials(username=submitted_username, password=password)
+    if _superuser_credentials_match(submitted_superuser):
+        token = _issue_superuser_session(submitted_username)
+        _record_superuser_activity(submitted_username, request, f"LOGIN_VIA_{role}_PORTAL")
+        response = RedirectResponse(url=f"/{role.lower()}/dashboard", status_code=303)
+        response.set_cookie(
+            "sidps_session", token, max_age=43200, httponly=True,
+            secure=True, samesite="lax", path="/",
+        )
+        return response
+
     if role == "DPC":
         # Setiap DPC memperoleh cakupan provinsi dan kabupaten/kota dari entri akunnya sendiri.
         accounts = _load_dpc_accounts()
@@ -2987,6 +3002,32 @@ def superuser_home():
     return RedirectResponse(url="/superuser/dashboard", status_code=302)
 
 
+@app.get("/superuser/open/{dashboard}", include_in_schema=False)
+def superuser_open_dashboard(
+    dashboard: str,
+    request: Request,
+    username: str = Depends(verify_superuser),
+):
+    """Perbarui cookie sesi global sebelum SUPERUSER berpindah ke dashboard lain."""
+    targets = {
+        "dpd": "/dpd/dashboard",
+        "dpc": "/dpc/dashboard",
+        "dps": "/dps/dashboard/pendaftaran-anggota",
+    }
+    target = targets.get(dashboard.strip().lower())
+    if not target:
+        raise HTTPException(status_code=404, detail="Dashboard tujuan tidak dikenal.")
+
+    token = _issue_superuser_session(username)
+    _record_superuser_activity(username, request, f"OPEN_{dashboard.strip().upper()}_DASHBOARD")
+    response = RedirectResponse(url=target, status_code=303)
+    response.set_cookie(
+        "sidps_session", token, max_age=43200, httponly=True,
+        secure=True, samesite="lax", path="/",
+    )
+    return response
+
+
 @app.get("/superuser/dashboard", response_class=HTMLResponse, tags=["Superuser"], summary="Dashboard akses global SUPERUSER")
 def superuser_dashboard(
     request: Request,
@@ -3004,9 +3045,9 @@ def superuser_dashboard(
     links = [
         ("Dashboard Admin", "/admin/dashboard", "Administrasi sistem, anggota, akun, dan data wilayah"),
         ("Dashboard Pimpinan", "/pimpinan", "Laporan survei, verifikasi, personel, dan peta"),
-        ("Dashboard DPD", "/dpd/dashboard", "Monitoring tingkat provinsi"),
-        ("Dashboard DPC", "/dpc/dashboard", "Monitoring tingkat kabupaten/kota"),
-        ("Dashboard DPS", "/dps/dashboard/pendaftaran-anggota", "Pemeriksaan pendaftaran anggota tingkat kecamatan"),
+        ("Dashboard DPD", "/superuser/open/dpd", "Monitoring tingkat provinsi"),
+        ("Dashboard DPC", "/superuser/open/dpc", "Monitoring tingkat kabupaten/kota"),
+        ("Dashboard DPS", "/superuser/open/dps", "Pemeriksaan pendaftaran anggota tingkat kecamatan"),
         ("Kelola Akses Aplikasi", "/admin/kelola-akun", "Pemberian dan pencabutan akses anggota terverifikasi"),
         ("Cakupan Wilayah Petugas", "/admin/cakupan-wilayah", "Pengesahan cakupan akses petugas"),
         ("Master Data Wilayah", "/admin/master-data-wilayah", "Pengelolaan referensi wilayah"),
