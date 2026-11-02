@@ -52,7 +52,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.12.0-four-tier-region-foundation",
+    version="3.13.0-superuser-global-access",
 )
 
 app.add_middleware(
@@ -66,11 +66,57 @@ app.add_middleware(
 
 # Dependensi autentikasi admin harus didefinisikan sebelum route yang memakainya.
 admin_security = HTTPBasic()
+superuser_security = HTTPBasic(auto_error=False)
+
+
+def _superuser_credentials_match(credentials: HTTPBasicCredentials | None) -> bool:
+    """Memeriksa kredensial SUPERUSER dari environment Hostless tanpa menyimpan password di database."""
+    expected_username = os.environ.get("SUPERUSER_USERNAME", "").strip()
+    expected_password = os.environ.get("SUPERUSER_PASSWORD", "")
+    if not credentials or not expected_username or not expected_password:
+        return False
+    return (
+        secrets.compare_digest(credentials.username.encode("utf-8"), expected_username.encode("utf-8"))
+        and secrets.compare_digest(credentials.password.encode("utf-8"), expected_password.encode("utf-8"))
+    )
+
+
+def _record_superuser_activity(username: str, request: Request, action: str = "ACCESS") -> None:
+    """Catat aktivitas SUPERUSER tanpa merekam kredensial atau isi data pribadi."""
+    try:
+        with get_db() as connection:
+            connection.execute(
+                """INSERT INTO superuser_audit_logs (actor_username, action, http_method, request_path, created_at)
+                   VALUES (%s, %s, %s, %s, NOW())""",
+                (username, action, request.method, request.url.path),
+            )
+    except Exception:
+        # Kegagalan pencatatan tidak boleh memutus akses sistem; error tetap terlihat di log server.
+        import logging
+        logging.exception("Gagal mencatat aktivitas SUPERUSER")
+
+
+def verify_superuser(
+    request: Request,
+    credentials: HTTPBasicCredentials = Depends(admin_security),
+):
+    if not _superuser_credentials_match(credentials):
+        raise HTTPException(
+            status_code=401,
+            detail="Kredensial SUPERUSER salah atau belum dikonfigurasi di server.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    _record_superuser_activity(credentials.username, request, "OPEN_SUPERUSER_DASHBOARD")
+    return credentials.username
 
 
 def verify_admin(
+    request: Request,
     credentials: HTTPBasicCredentials = Depends(admin_security),
 ):
+    if _superuser_credentials_match(credentials):
+        _record_superuser_activity(credentials.username, request, "ADMIN_ACCESS")
+        return credentials.username
     admin_username = os.environ.get("ADMIN_USERNAME", "")
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
 
@@ -599,6 +645,25 @@ def initialize_database():
             new_scope JSONB NOT NULL DEFAULT '{}'::jsonb,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
+        # Audit log khusus aktivitas SUPERUSER, terpisah dari log perubahan cakupan petugas.
+        connection.execute("""CREATE TABLE IF NOT EXISTS superuser_audit_logs (
+            id BIGSERIAL PRIMARY KEY,
+            actor_username VARCHAR(150) NOT NULL,
+            action VARCHAR(80) NOT NULL DEFAULT 'ACCESS',
+            http_method VARCHAR(12) NOT NULL DEFAULT '',
+            request_path TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_superuser_audit_created ON superuser_audit_logs(created_at DESC)")
+        # Sesi token SUPERUSER terpisah karena akun global tidak terikat pada satu data anggota/wilayah.
+        connection.execute("""CREATE TABLE IF NOT EXISTS superuser_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            username VARCHAR(150) NOT NULL,
+            token_hash VARCHAR(64) UNIQUE NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_superuser_sessions_expiry ON superuser_sessions(expires_at)")
         connection.execute("""CREATE TABLE IF NOT EXISTS organization_targets (
             id BIGSERIAL PRIMARY KEY,
             target_name VARCHAR(100) NOT NULL UNIQUE,
@@ -715,8 +780,13 @@ def startup_event():
 # =========================================================
 
 def verify_api_key(
+    request: Request,
     api_key: str = Depends(api_key_header),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    if _superuser_credentials_match(credentials):
+        _record_superuser_activity(credentials.username, request, "ADMIN_API_ACCESS")
+        return True
     if (
         not API_TOKEN
         or not api_key
@@ -745,9 +815,15 @@ def _token_hash(token: str) -> str:
 
 
 def get_request_identity(
+    request: Request,
     authorization: str | None = Header(default=None),
     api_key: str | None = Depends(api_key_header),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    # SUPERUSER memiliki akses global melalui satu kredensial khusus Hostless.
+    if _superuser_credentials_match(credentials):
+        _record_superuser_activity(credentials.username, request, "APPLICATION_API_ACCESS")
+        return {"auth_type": "superuser", "member_id": credentials.username, "member_name": "SUPERUSER", "role": "SUPERUSER", "scope_verified": 1}
     # API key lama tetap diterima untuk kompatibilitas dashboard/versi aplikasi lama.
     if API_TOKEN and api_key and secrets.compare_digest(api_key, API_TOKEN):
         return {"auth_type": "api_key", "role": "LEGACY_ADMIN"}
@@ -781,14 +857,27 @@ def get_request_identity(
                     "scope_village_name": row["scope_village_name"],
                     "scope_verified": row["scope_verified"],
                 }
+            with get_db() as connection:
+                su = connection.execute(
+                    "SELECT username FROM superuser_sessions WHERE token_hash=%s AND expires_at>NOW()",
+                    (_token_hash(token),),
+                ).fetchone()
+            if su:
+                _record_superuser_activity(su["username"], request, "APPLICATION_API_ACCESS")
+                return {"auth_type": "superuser", "member_id": su["username"], "member_name": "SUPERUSER", "role": "SUPERUSER", "scope_verified": 1}
 
     raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
 
 
 def get_officer_identity(
+    request: Request,
     authorization: str | None = Header(default=None),
     sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
 ):
+    if _superuser_credentials_match(credentials):
+        _record_superuser_activity(credentials.username, request, "GLOBAL_DASHBOARD_ACCESS")
+        return {"auth_type": "superuser", "member_id": credentials.username, "member_name": "SUPERUSER", "role": "SUPERUSER", "region": "NASIONAL", "officer_id": None, "scope_province": "", "scope_regency": "", "scope_district": "", "scope_village_name": "", "scope_verified": 1}
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -809,7 +898,15 @@ def get_officer_identity(
             (_token_hash(token),),
         ).fetchone()
     if not row or row["active"] != 1:
-        raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.")
+        with get_db() as connection:
+            su = connection.execute(
+                "SELECT username FROM superuser_sessions WHERE token_hash=%s AND expires_at>NOW()",
+                (_token_hash(token),),
+            ).fetchone()
+        if su:
+            _record_superuser_activity(su["username"], request, "GLOBAL_DASHBOARD_ACCESS")
+            return {"auth_type": "superuser", "member_id": su["username"], "member_name": "SUPERUSER", "role": "SUPERUSER", "region": "NASIONAL", "officer_id": None, "scope_province": "", "scope_regency": "", "scope_district": "", "scope_village_name": "", "scope_verified": 1}
+        raise HTTPException(status_code=401, detail="Sesi tidak valid atau sudah berakhir. Silakan login kembali.", headers={"WWW-Authenticate": "Basic"})
     return {
         "auth_type": "officer",
         "member_id": row["member_id"],
@@ -839,8 +936,26 @@ class OfficerCreate(BaseModel):
 
 
 @app.post("/auth/login")
-def officer_login(payload: OfficerLogin):
+def officer_login(payload: OfficerLogin, request: Request):
     member_id = payload.member_id.strip()
+    # Satu kredensial SUPERUSER dapat dipakai pada dashboard web dan aplikasi berbasis Bearer token.
+    su_credentials = HTTPBasicCredentials(username=member_id, password=payload.password)
+    if _superuser_credentials_match(su_credentials):
+        token = secrets.token_urlsafe(48)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
+        with get_db() as connection:
+            connection.execute("DELETE FROM superuser_sessions WHERE expires_at <= NOW()")
+            connection.execute(
+                "INSERT INTO superuser_sessions (username, token_hash, expires_at) VALUES (%s, %s, %s)",
+                (member_id, _token_hash(token), expires_at),
+            )
+        _record_superuser_activity(member_id, request, "LOGIN")
+        return {
+            "access_token": token, "token_type": "Bearer", "expires_at": expires_at.isoformat(),
+            "member_id": member_id, "member_name": "SUPERUSER", "role": "SUPERUSER",
+            "region": "NASIONAL", "scope_province": "", "scope_regency": "",
+            "scope_district": "", "scope_village_name": "", "scope_verified": 1,
+        }
     with get_db() as connection:
         officer = connection.execute(
             "SELECT * FROM officers WHERE member_id = %s", (member_id,)
@@ -858,9 +973,8 @@ def officer_login(payload: OfficerLogin):
             raise HTTPException(status_code=401, detail="ID petugas atau kata sandi salah, atau akun tidak aktif.")
         token = secrets.token_urlsafe(48)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=12)
-        connection.execute(
-            "DELETE FROM officer_sessions WHERE expires_at <= NOW()"
-        )
+        connection.execute("DELETE FROM officer_sessions WHERE expires_at <= NOW()")
+        connection.execute("DELETE FROM superuser_sessions WHERE expires_at <= NOW()")
         connection.execute(
             "INSERT INTO officer_sessions (officer_id, token_hash, expires_at) VALUES (%s, %s, %s)",
             (officer["id"], _token_hash(token), expires_at),
@@ -896,6 +1010,7 @@ def officer_logout(authorization: str | None = Header(default=None)):
     token = authorization[7:].strip()
     with get_db() as connection:
         connection.execute("DELETE FROM officer_sessions WHERE token_hash = %s", (_token_hash(token),))
+        connection.execute("DELETE FROM superuser_sessions WHERE token_hash = %s", (_token_hash(token),))
     return {"message": "Berhasil keluar."}
 
 
@@ -1623,6 +1738,8 @@ def _validate_file_signature(content: bytes, content_type: str) -> bool:
 
 
 def require_dps(identity: dict = Depends(get_officer_identity)):
+    if identity.get("role") == "SUPERUSER":
+        return identity
     if identity.get("role") != "DPS":
         raise HTTPException(status_code=403, detail="Fitur ini khusus akun petugas DPS.")
     return identity
@@ -1637,6 +1754,8 @@ def _normalize_region_name(value: str | None) -> str:
 
 
 def require_verified_dps_scope(identity: dict = Depends(require_dps)):
+    if identity.get("role") == "SUPERUSER":
+        return identity
     # Akun DPS hanya boleh memeriksa data setelah cakupan resminya ditetapkan
     # oleh admin/pimpinan. Isian wilayah dari pendaftar tidak pernah memberi hak akses.
     if identity.get("scope_verified") not in (1, True):
@@ -1749,6 +1868,8 @@ def dps_browser_logout(sidps_session: str | None = Cookie(default=None)):
 # =========================================================
 
 def _require_verified_monitor_scope(role: str, identity: dict):
+    if identity.get("role") == "SUPERUSER":
+        return identity
     if identity.get("role") != role:
         raise HTTPException(status_code=403, detail=f"Fitur ini khusus akun {role}.")
     if identity.get("scope_verified") not in (1, True):
@@ -2607,9 +2728,9 @@ def delete_survey_from_admin(
 
 
 @app.get("/admin/kelola-akun", response_class=HTMLResponse)
-def account_management_dashboard(credentials: HTTPBasicCredentials = Depends(admin_security)):
-    # Halaman ini dapat dibuka admin maupun pimpinan yang kredensialnya dikonfigurasi.
-    username = verify_pimpinan_or_admin(credentials)
+def account_management_dashboard(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
+    # Halaman ini dapat dibuka admin, pimpinan, maupun SUPERUSER.
+    username = verify_pimpinan_or_admin(request, credentials)
     return HTMLResponse(r"""<!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kelola Akses Aplikasi | Triple 555</title>
@@ -2639,6 +2760,50 @@ $('membersBody').addEventListener('click',async e=>{const g=e.target.closest('[d
 $('cancelGrant').addEventListener('click',()=>$('grantDialog').close());$('grantForm').addEventListener('submit',async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;try{const id=$('registrationId').value;const r=await api('/admin/kelola-akun/'+id+'/akses',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('initialPassword').value})});$('grantDialog').close();msg(r.message+' ID Member/Login: '+r.member_id,true);await load()}catch(err){msg(err.message)}finally{b.disabled=false}});
 load();})();
 </script></body></html>""".replace("__USERNAME__", escape(username)))
+
+
+@app.get("/superuser", include_in_schema=False)
+def superuser_home():
+    return RedirectResponse(url="/superuser/dashboard", status_code=302)
+
+
+@app.get("/superuser/dashboard", response_class=HTMLResponse, tags=["Superuser"], summary="Dashboard akses global SUPERUSER")
+def superuser_dashboard(username: str = Depends(verify_superuser)):
+    """Pusat navigasi SUPERUSER ke dashboard yang tersedia pada server ini."""
+    links = [
+        ("Dashboard Admin", "/admin/dashboard", "Administrasi sistem, anggota, akun, dan data wilayah"),
+        ("Dashboard Pimpinan", "/pimpinan", "Laporan survei, verifikasi, personel, dan peta"),
+        ("Dashboard DPD", "/dpd/dashboard", "Monitoring tingkat provinsi"),
+        ("Dashboard DPC", "/dpc/dashboard", "Monitoring tingkat kabupaten/kota"),
+        ("Dashboard DPS", "/dps/dashboard/pendaftaran-anggota", "Pemeriksaan pendaftaran anggota tingkat kecamatan"),
+        ("Kelola Akses Aplikasi", "/admin/kelola-akun", "Pemberian dan pencabutan akses anggota terverifikasi"),
+        ("Cakupan Wilayah Petugas", "/admin/cakupan-wilayah", "Pengesahan cakupan akses petugas"),
+        ("Master Data Wilayah", "/admin/master-data-wilayah", "Pengelolaan referensi wilayah"),
+        ("Data Personel", "/admin/data-personel", "Data personel dan status akses"),
+        ("Audit Aktivitas SUPERUSER", "/superuser/audit", "Riwayat akses dan aktivitas akun global"),
+    ]
+    cards = "".join(
+        "<a class='card' href='" + escape(path) + "'><strong>" + escape(title) + "</strong><span>" + escape(desc) + "</span></a>"
+        for title, path, desc in links
+    )
+    page = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>SUPERUSER | SIDPS 555</title>
+    <style>*{{box-sizing:border-box}}body{{margin:0;background:#16090c;color:#f7eee5;font:15px/1.5 system-ui,Arial}}header{{padding:25px;background:linear-gradient(110deg,#19080c,#500813 60%,#26090e);border-bottom:2px solid #e0ad35}}main{{max-width:1100px;margin:auto;padding:22px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}.card{{display:flex;flex-direction:column;gap:8px;padding:19px;border:1px solid #5b3939;border-radius:13px;background:#211316;color:#f1cb72;text-decoration:none;min-height:105px}}.card span{{color:#d7c7bd;font-size:13px}}.note{{margin:18px 0;padding:14px;border-left:4px solid #e0ad35;background:#211316;color:#e9ded5}}small{{color:#c8b6ad}}</style></head><body><header><h1 style='margin:0;color:#f1cb72'>SUPERUSER · SIDPS 555</h1><div>Akses global aktif untuk {escape(username)}</div><small>Satu akun pengendali utama. Pembatasan akses akun wilayah lainnya tetap berlaku.</small></header><main><div class='note'>Gunakan akses global secara bertanggung jawab. Aktivitas SUPERUSER pada endpoint yang dilindungi dicatat dalam audit log.</div><section class='grid'>{cards}</section></main></body></html>"""
+    return HTMLResponse(page)
+
+
+@app.get("/superuser/audit", response_class=HTMLResponse, tags=["Superuser"], summary="Riwayat aktivitas SUPERUSER")
+def superuser_audit_dashboard(username: str = Depends(verify_superuser)):
+    with get_db() as connection:
+        rows = connection.execute(
+            """SELECT actor_username, action, http_method, request_path, created_at
+               FROM superuser_audit_logs ORDER BY created_at DESC LIMIT 200"""
+        ).fetchall()
+    body = "".join(
+        "<tr><td>" + escape(str(r["created_at"])) + "</td><td>" + escape(r["actor_username"])
+        + "</td><td>" + escape(r["action"]) + "</td><td>" + escape(r["http_method"])
+        + "</td><td>" + escape(r["request_path"]) + "</td></tr>" for r in rows
+    ) or "<tr><td colspan='5'>Belum ada aktivitas tercatat.</td></tr>"
+    return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Audit SUPERUSER | SIDPS</title><style>body{margin:0;background:#16090c;color:#f7eee5;font:14px system-ui}header{padding:22px;background:#31090e;border-bottom:2px solid #e0ad35}main{max-width:1100px;margin:auto;padding:20px}.panel{background:#211316;border:1px solid #5b3939;border-radius:12px;padding:16px;overflow:auto}table{width:100%;border-collapse:collapse;min-width:700px}td,th{padding:10px;border-bottom:1px solid #5b3939;text-align:left}th{color:#f1cb72}a{color:#f1cb72}</style></head><body><header><h1>Audit Aktivitas SUPERUSER</h1><a href='/superuser/dashboard'>Kembali ke dashboard SUPERUSER</a></header><main><section class='panel'><p>Menampilkan maksimal 200 aktivitas terbaru. Kredensial dan isi data pribadi tidak dicatat.</p><table><thead><tr><th>Waktu</th><th>Akun</th><th>Aktivitas</th><th>Metode</th><th>Endpoint</th></tr></thead><tbody>""" + body + """</tbody></table></section></main></body></html>""")
 
 
 @app.get("/admin/dashboard", response_class=HTMLResponse)
@@ -2962,8 +3127,11 @@ from fastapi.security import HTTPBasicCredentials
 from urllib.parse import urlencode
 
 
-def verify_pimpinan_or_admin(credentials: HTTPBasicCredentials = Depends(admin_security)):
-    """Akses dashboard untuk admin lama atau akun pimpinan dari environment."""
+def verify_pimpinan_or_admin(request: Request, credentials: HTTPBasicCredentials = Depends(admin_security)):
+    """Akses dashboard untuk admin, pimpinan, atau SUPERUSER."""
+    if _superuser_credentials_match(credentials):
+        _record_superuser_activity(credentials.username, request, "LEADERSHIP_ACCESS")
+        return credentials.username
     allowed_pairs = [
         (os.environ.get("ADMIN_USERNAME", ""), os.environ.get("ADMIN_PASSWORD", "")),
         (os.environ.get("PIMPINAN_USERNAME", ""), os.environ.get("PIMPINAN_PASSWORD", "")),
