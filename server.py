@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.11-member-recap-regional-titles",
+    version="3.13.12-member-data-labels",
 )
 
 app.add_middleware(
@@ -3737,7 +3737,7 @@ main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
 .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#211518;border:1px solid #5b3939;border-left:4px solid var(--gold);border-radius:13px;padding:14px}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#302225}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:#b8a8a0;font-size:11px}}.person-info h3{{margin:0 0 3px;color:#f1cb72}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#174d32;color:#a7efbf}}.status.inactive{{background:#604316;color:#ffdf8a}}footer{{text-align:center;color:#988780;font-size:12px;padding:20px}}
 @media(max-width:900px){{.shell{{grid-template-columns:1fr;padding:14px}}.nav{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.nav:before{{display:none}}.nav a{{flex:0 0 auto}}}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}.shell{{padding:10px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Rekap Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
@@ -4426,7 +4426,7 @@ def _member_recap_html(rows, title, scope_text, base_path, q=""):
 @app.get("/pimpinan/personel", response_class=HTMLResponse)
 def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
     rows = _member_recap_rows("PIMPINAN", None, q)
-    return HTMLResponse(_member_recap_html(rows, "Rekap Seluruh Anggota 555", "Cakupan nasional", "/pimpinan/personel", q))
+    return HTMLResponse(_member_recap_html(rows, "Data Anggota 555", "Cakupan nasional · Seluruh anggota", "/pimpinan/personel", q))
 
 
 @app.get("/dpd/anggota", response_class=HTMLResponse)
@@ -4535,11 +4535,11 @@ def _member_recap_export_pdf(rows, filename, title):
 
 @app.get("/pimpinan/personel/export/excel")
 def pimpinan_rekap_anggota_excel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
-    return _member_recap_export_excel(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.xlsx","Rekap Seluruh Anggota 555")
+    return _member_recap_export_excel(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.xlsx","Data Anggota 555")
 
 @app.get("/pimpinan/personel/export/pdf")
 def pimpinan_rekap_anggota_pdf(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
-    return _member_recap_export_pdf(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.pdf","Rekap Seluruh Anggota 555")
+    return _member_recap_export_pdf(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.pdf","Data Anggota 555")
 
 @app.get("/dpd/anggota/export/excel")
 def dpd_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
@@ -4621,7 +4621,7 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
     content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
 {_lead_map_embed(surveys, verifications)}
 <section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
-<section class='cards'><article class='report-card'><h2>👥 Data Personel DPS dan DPSS</h2><p>Daftar anggota terverifikasi dan status penugasan akses aplikasi. Pemberian akses hanya untuk anggota yang ditunjuk dan disetujui pimpinan/admin.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Personel</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Identitas anggota bersumber dari pendaftaran mandiri yang telah diverifikasi. Pengaturan akun hanya untuk memberikan atau mencabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a></article></section>
+<section class='cards'><article class='report-card'><h2>👥 Data Anggota DPS dan DPSS</h2><p>Daftar anggota terverifikasi beserta identitas dan dokumen keanggotaannya. Pengaturan akses aplikasi dilakukan melalui menu Kelola Akses.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Anggota</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Identitas anggota bersumber dari pendaftaran mandiri yang telah diverifikasi. Pengaturan akun hanya untuk memberikan atau mencabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a></article></section>
 <section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
     return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
 
