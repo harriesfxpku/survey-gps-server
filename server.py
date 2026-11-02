@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.9-member-recap-a4-export",
+    version="3.13.11-member-recap-regional-titles",
 )
 
 app.add_middleware(
@@ -2400,7 +2400,7 @@ def dps_member_registration_dashboard(
     return HTMLResponse(f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Anggota DPS</title>
     <style>
     *{{box-sizing:border-box}}body{{margin:0;background:#f4f0eb;color:#302729;font:15px system-ui,Arial}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:white;padding:24px max(18px,calc((100% - 1100px)/2));border-bottom:4px solid #d8b15a}}header h1{{margin:0 0 7px;font-size:24px}}header p{{margin:0;color:#f3dfb4}}main{{max-width:1100px;margin:24px auto;padding:0 16px}}.scope{{background:#fff8e9;border:1px solid #e6d4a9;border-radius:12px;padding:14px 16px;margin-bottom:18px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:18px 0}}.tabs{{display:flex;gap:7px;flex-wrap:wrap}}.tab{{padding:9px 13px;border-radius:8px;text-decoration:none;background:#e8dfd8;color:#5b1018;font-weight:650}}.tab.active{{background:#5b1018;color:white}}input{{padding:10px 12px;border:1px solid #cfc5bd;border-radius:8px;min-width:230px}}button{{border:0;background:#5b1018;color:white;padding:11px 16px;border-radius:8px;font-weight:700;cursor:pointer}}.count{{color:#6d5e5b;font-size:13px}}.card{{background:white;border-radius:14px;padding:20px;margin:14px 0;box-shadow:0 3px 15px #32101812;border:1px solid #eee5df}}.cardtop{{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}}h2{{margin:9px 0 3px;color:#5b1018}}.badge{{display:inline-block;background:#f4e7c8;color:#6b4b12;padding:5px 9px;border-radius:20px;font-size:11px;font-weight:800}}.muted{{color:#847773;font-size:12px}}.membercode{{text-align:right;color:#8a7771;font-size:12px}}.membercode b{{color:#5b1018;font-size:14px}}.photos{{display:flex;gap:14px;flex-wrap:wrap;margin:16px 0}}.photo{{width:150px;height:150px;object-fit:cover;border:1px solid #ddd;border-radius:10px;background:#fafafa}}.photo.ktp{{width:230px}}.missing{{width:150px;height:100px;border:1px dashed #cbbfb8;border-radius:10px;display:grid;place-items:center;color:#998b84;font-size:12px;text-align:center;padding:8px}}.details p{{margin:8px 0;line-height:1.5}}.decision{{border-top:1px solid #eee5df;margin-top:16px;padding-top:15px;display:grid;gap:8px;max-width:520px}}label{{font-weight:700;font-size:13px}}select,textarea{{font:inherit;padding:10px;border:1px solid #cfc5bd;border-radius:8px;background:white}}textarea{{resize:vertical}}.empty{{background:white;padding:35px;border-radius:12px;text-align:center;color:#786b66}}footer{{text-align:center;color:#938681;font-size:12px;padding:25px}}
-    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p>{'Dashboard DPS · Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi'}</p></div>{"<a href='/superuser/dashboard' style='color:#f3dfb4;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a>" if identity.get('role') == 'SUPERUSER' else ''}<form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
+    </style></head><body><header><div style='max-width:1100px;margin:auto;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'><div><h1>Verifikasi Pendaftaran Anggota</h1><p>{'Dashboard DPS · Akses global SUPERUSER' if identity.get('role') == 'SUPERUSER' else 'Dashboard petugas DPS · Pemeriksaan sesuai cakupan wilayah resmi'}</p></div><a href='/dps/anggota' style='color:#f3dfb4;text-decoration:none;font-weight:700'>Rekap Anggota Kecamatan</a> {"<a href='/superuser/dashboard' style='color:#f3dfb4;text-decoration:none;font-weight:700'>Pusat SUPERUSER</a>" if identity.get('role') == 'SUPERUSER' else ''}<form method='post' action='/dps/logout'><button type='submit' style='background:#d8b15a;color:#31090e'>Keluar</button></form></div></header><main>
     <section class='scope'><b>Cakupan tugas:</b> {('NASIONAL · AKSES GLOBAL SUPERUSER' if identity.get('role') == 'SUPERUSER' else esc(identity['scope_district']) + ', ' + esc(identity['scope_regency']) + ', ' + esc(identity['scope_province']))}<br><small>{'SUPERUSER dapat melihat dan memeriksa pendaftaran DPS dan DPSS di seluruh wilayah.' if identity.get('role') == 'SUPERUSER' else 'Daftar ini hanya memuat pendaftaran DPS dan DPSS di wilayah kewenangan akun Anda.'}</small></section>
     <div class='toolbar'><nav class='tabs'>{tabs}</nav><form method='get' action='/dps/dashboard/pendaftaran-anggota'><input type='hidden' name='status' value='{esc(status)}'><input name='q' value='{esc(query)}' placeholder='Cari nama, NIK, telepon, kode'><button type='submit'>Cari</button></form></div>
     <div class='count'>{esc(count_label)} · Maksimal 300 data per tampilan</div>{body}
@@ -4356,18 +4356,24 @@ def _member_recap_rows(scope_role: str, identity: dict | None = None, q: str = "
     """Satu sumber data dari pendaftaran anggota; filter wilayah diterapkan di SQL."""
     where = ["1=1"]
     params = []
-    if scope_role in ("DPD", "DPC") and (identity or {}).get("role") != "SUPERUSER":
+    if scope_role in ("DPD", "DPC", "DPS") and (identity or {}).get("role") != "SUPERUSER":
         province = re.sub(r'^(provinsi|prov[.]?)\s+', '', _normalize_region_name((identity or {}).get("scope_province")))
         regency = _normalize_region_name((identity or {}).get("scope_regency"))
+        district = _normalize_region_name((identity or {}).get("scope_district"))
         if not province:
             raise HTTPException(status_code=403, detail="Cakupan provinsi akun belum lengkap.")
         where.append("lower(trim(regexp_replace(regexp_replace(coalesce(r.province_name,''),'^(provinsi|prov[.]?)[[:space:]]+','','i'),'[[:space:]]+',' ','g')))=%s")
         params.append(province)
-        if scope_role == "DPC":
+        if scope_role in ("DPC", "DPS"):
             if not regency:
                 raise HTTPException(status_code=403, detail="Cakupan kabupaten/kota akun belum lengkap.")
             where.append("lower(trim(regexp_replace(regexp_replace(coalesce(r.regency_name,''),'^(kabupaten|kab[.]?|kota)[[:space:]]+','','i'),'[[:space:]]+',' ','g')))=%s")
             params.append(regency)
+        if scope_role == "DPS":
+            if not district:
+                raise HTTPException(status_code=403, detail="Cakupan kecamatan akun belum lengkap.")
+            where.append("lower(trim(regexp_replace(regexp_replace(coalesce(r.district_name,''),'^(kecamatan|kec[.]?)[[:space:]]+','','i'),'[[:space:]]+',' ','g')))=%s")
+            params.append(district)
     if q.strip():
         where.append("(r.full_name ILIKE %s OR r.nik ILIKE %s OR r.phone ILIKE %s OR r.org_position ILIKE %s OR r.address ILIKE %s OR r.village_name ILIKE %s OR r.district_name ILIKE %s OR r.regency_name ILIKE %s OR r.province_name ILIKE %s)")
         params.extend([f"%{q.strip()}%"] * 9)
@@ -4411,7 +4417,7 @@ def _member_recap_html(rows, title, scope_text, base_path, q=""):
     if not cards:
         cards=["<div class='empty'>Belum ada data anggota pada cakupan ini.</div>"]
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{_lead_e(title)}</title><style>
-*{{box-sizing:border-box}}body{{margin:0;background:#f3efea;color:#2c2222;font:14px/1.45 Arial, sans-serif}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:#fff;padding:18px 22px;border-bottom:4px solid #d8b15a}}header h1{{margin:0;color:#f4d58a;font-size:23px}}header p{{margin:4px 0 0}}main{{max-width:1200px;margin:20px auto;padding:0 16px}}.toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;padding:14px;border:1px solid #e4d9d0;border-radius:10px;margin-bottom:14px}}input{{padding:10px;border:1px solid #cbbdb4;border-radius:7px;min-width:240px;font:inherit}}button,.btn{{display:inline-block;padding:10px 13px;background:#5b1018;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:700;cursor:pointer}}.btn.gold{{background:#d8b15a;color:#31090e}}.member-row{{display:grid;grid-template-columns:minmax(130px,18%) minmax(150px,21%) minmax(0,61%);gap:14px;background:#fff;border:1px solid #dfd4cc;border-left:5px solid #d8b15a;border-radius:10px;padding:14px;margin:12px 0;break-inside:avoid;page-break-inside:avoid;align-items:start}}.photo-cell{{min-width:0;text-align:center}}.photo-label{{font-size:11px;font-weight:800;letter-spacing:.7px;color:#6b1920;margin:0 0 7px}}.recap-photo{{display:block;width:100%;height:145px;object-fit:contain;background:#f7f5f2;border:1px solid #ddd;border-radius:6px}}.recap-photo.ktp{{height:145px}}.recap-missing{{height:145px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;border:1px dashed #b9aaa0;border-radius:6px;color:#897c75;background:#faf8f6;font-size:12px}}.identity-cell{{min-width:0;overflow-wrap:anywhere}}.identity-cell h3{{margin:0 0 8px;color:#5b1018;font-size:17px}}.detail-line{{display:grid;grid-template-columns:minmax(125px,30%) minmax(0,70%);gap:8px;padding:4px 0;border-bottom:1px solid #eee7e1}}.detail-line b{{color:#6a4b43;font-size:12px}}.detail-line span{{min-width:0;overflow-wrap:anywhere}}.muted{{color:#70645e;font-size:12px}}.empty{{background:white;padding:28px;text-align:center;border-radius:9px}}footer{{text-align:center;color:#756963;padding:18px;font-size:11px}}
+*{{box-sizing:border-box}}body{{margin:0;background:#f3efea;color:#2c2222;font:14px/1.45 Arial, sans-serif}}header{{background:linear-gradient(110deg,#31090e,#5b1018);color:#fff;padding:18px 22px;border-bottom:4px solid #d8b15a}}header h1{{margin:0;color:#f4d58a;font-size:23px}}header p{{margin:4px 0 0}}main{{max-width:1200px;margin:20px auto;padding:0 16px}}.toolbar{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;padding:14px;border:1px solid #e4d9d0;border-radius:10px;margin-bottom:14px}}input{{padding:10px;border:1px solid #cbbdb4;border-radius:7px;min-width:240px;font:inherit}}button,.btn{{display:inline-block;padding:10px 13px;background:#5b1018;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:700;cursor:pointer}}.btn.gold{{background:#d8b15a;color:#31090e}}.member-row{{display:grid;grid-template-columns:minmax(130px,18%) minmax(150px,21%) minmax(0,61%);gap:14px;background:#fff;border:1px solid #dfd4cc;border-left:5px solid #d8b15a;border-radius:10px;padding:14px;margin:12px 0;break-inside:avoid;page-break-inside:avoid;align-items:start}}.photo-cell{{min-width:0;text-align:center}}.photo-label{{font-size:11px;font-weight:800;letter-spacing:.7px;color:#6b1920;margin:0 0 7px}}.recap-photo{{display:block;width:100%;height:145px;object-fit:contain;background:#f7f5f2;border:1px solid #ddd;border-radius:6px}}.recap-photo.ktp{{height:145px}}.recap-missing{{height:145px;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;border:1px dashed #b9aaa0;border-radius:6px;color:#897c75;background:#faf8f6;font-size:12px}}.identity-cell{{min-width:0;overflow-wrap:anywhere}}.identity-cell h3{{margin:0 0 8px;color:#5b1018;font-size:17px}}.detail-line{{display:grid;grid-template-columns:minmax(125px,30%) minmax(0,70%);gap:8px;padding:4px 0;border-bottom:1px solid #eee7e1}}.detail-line b{{color:#6a4b43;font-size:12px}}.detail-line span{{min-width:0;overflow-wrap:anywhere}}.member-row .identity-cell,.member-row .identity-cell h3,.member-row .detail-line,.member-row .detail-line b,.member-row .detail-line span{{color:#5b1018!important}}.muted{{color:#70645e;font-size:12px}}.empty{{background:white;padding:28px;text-align:center;border-radius:9px}}footer{{text-align:center;color:#756963;padding:18px;font-size:11px}}
 @media(max-width:700px){{.member-row{{grid-template-columns:1fr 1fr;gap:10px}}.identity-cell{{grid-column:1/-1}}.recap-photo,.recap-missing{{height:130px}}}}
 @page{{size:A4 landscape;margin:9mm}}@media print{{body{{background:#fff;font-size:9pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}}header{{padding:7mm 8mm}}header h1{{font-size:16pt}}main{{max-width:none;margin:4mm 0;padding:0}}.toolbar,.no-print,footer{{display:none!important}}.member-row{{grid-template-columns:21% 23% 56%;gap:3mm;padding:3mm;margin:0 0 3mm;border-radius:0;box-shadow:none;border:0;border-bottom:1px solid #b9aaa0;break-inside:avoid;page-break-inside:avoid}}.recap-photo,.recap-missing{{height:34mm;max-height:34mm}}.photo-label{{font-size:7pt}}.identity-cell h3{{font-size:11pt;margin-bottom:2mm}}.detail-line{{grid-template-columns:30% 70%;gap:2mm;padding:1mm 0;font-size:8pt}}.detail-line b{{font-size:7.5pt}}}}
 </style></head><body><header><h1>{_lead_e(title)}</h1><p>{_lead_e(scope_text)} · Jumlah anggota: {len(rows)}</p></header><main><div class='toolbar no-print'><form method='get' action='{base_path}'><input name='q' value='{_lead_e(q)}' placeholder='Cari nama, NIK, jabatan, wilayah'><button type='submit'>Cari</button></form><div><a class='btn gold' href='{base_path}/export/pdf?q={quote(q)}'>PDF A4</a> <a class='btn gold' href='{base_path}/export/excel?q={quote(q)}'>Excel</a> <button onclick='window.print()'>Cetak A4</button></div></div>{''.join(cards)}</main><footer>Ikatan Persaudaraan Triple 555 · Dokumen internal organisasi</footer></body></html>"""
@@ -4426,30 +4432,43 @@ def pimpinan_data_personel(q: str = "", username: str = Depends(verify_pimpinan_
 @app.get("/dpd/anggota", response_class=HTMLResponse)
 def dpd_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
     rows = _member_recap_rows("DPD", identity, q)
-    scope = "Seluruh Provinsi" if identity.get('role') == 'SUPERUSER' else f"Provinsi {identity.get('scope_province','')}"
-    return HTMLResponse(_member_recap_html(rows, "Rekap Anggota DPD", scope, "/dpd/anggota", q))
+    scope = "Seluruh kabupaten/kota di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh kabupaten/kota di Provinsi {identity.get('scope_province','')}"
+    title = "Rekap Anggota Seluruh Kabupaten/Kota" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kabupaten/Kota Provinsi {identity.get('scope_province','')}"
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpd/anggota", q))
 
 
 @app.get("/dpc/anggota", response_class=HTMLResponse)
 def dpc_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
     rows = _member_recap_rows("DPC", identity, q)
-    scope = "Seluruh wilayah" if identity.get('role') == 'SUPERUSER' else f"{identity.get('scope_regency','')}, {identity.get('scope_province','')}"
-    return HTMLResponse(_member_recap_html(rows, "Rekap Anggota DPC", scope, "/dpc/anggota", q))
+    scope = "Seluruh kecamatan di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh kecamatan di {identity.get('scope_regency','')}, {identity.get('scope_province','')}"
+    title = "Rekap Anggota Seluruh Kecamatan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kecamatan {identity.get('scope_regency','')}"
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dpc/anggota", q))
 
 
-def _member_recap_export_excel(rows, filename):
+@app.get("/dps/anggota", response_class=HTMLResponse)
+def dps_rekap_anggota(q: str = "", identity: dict = Depends(require_verified_dps_scope)):
+    rows = _member_recap_rows("DPS", identity, q)
+    scope = "Seluruh desa/kelurahan di Indonesia" if identity.get('role') == 'SUPERUSER' else f"Seluruh desa/kelurahan di Kecamatan {identity.get('scope_district','')}, {identity.get('scope_regency','')}, {identity.get('scope_province','')}"
+    title = "Rekap Anggota Seluruh Desa/Kelurahan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Desa/Kelurahan Kecamatan {identity.get('scope_district','')}"
+    return HTMLResponse(_member_recap_html(rows, title, scope, "/dps/anggota", q))
+
+
+def _member_recap_export_excel(rows, filename, title="Rekap Anggota"):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.drawing.image import Image as XLImage
     from io import BytesIO as _BytesIO
     from PIL import Image as PILImage
     wb=Workbook(); ws=wb.active; ws.title="Rekap Anggota"
+    ws.merge_cells("A1:C1"); ws["A1"] = title
+    ws["A1"].font=Font(bold=True,size=14,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="31090E"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center")
+    ws.row_dimensions[1].height=28
     ws.append(["Foto Diri","Foto KTP","Keterangan Identitas"])
-    for c in ws[1]:
+    for c in ws[2]:
         c.font=Font(bold=True,color="FFFFFF"); c.fill=PatternFill("solid",fgColor="5B1018"); c.alignment=Alignment(horizontal="center",vertical="center")
-    ws.column_dimensions['A'].width=24; ws.column_dimensions['B'].width=30; ws.column_dimensions['C'].width=78; ws.row_dimensions[1].height=24
+    ws.column_dimensions['A'].width=24; ws.column_dimensions['B'].width=30; ws.column_dimensions['C'].width=78; ws.row_dimensions[2].height=24
     thin=Side(style="thin",color="D8C9BE")
-    for idx,r in enumerate(rows, start=2):
+    for idx,r in enumerate(rows, start=3):
         area=", ".join(x for x in [r.get('village_name'),r.get('district_name'),r.get('regency_name'),r.get('province_name')] if x) or r.get('region') or '-'
         detail="\n".join([f"Nama lengkap: {r.get('full_name') or '-'}",f"ID anggota: {r.get('member_code') or r.get('registration_code') or '-'}",f"Jabatan: {r.get('org_position') or '-'}",f"Tingkat organisasi: {r.get('org_level') or '-'}",f"NIK: {r.get('nik') or '-'}",f"Tempat/tanggal lahir: {r.get('birth_place') or '-'}, {r.get('birth_date') or '-'}",f"Jenis kelamin: {r.get('gender') or '-'}",f"Alamat: {r.get('address') or '-'}",f"Wilayah: {area}",f"Nomor HP: {r.get('phone') or '-'}",f"Email: {r.get('email') or '-'}",f"Status: {r.get('status') or '-'}"])
         ws.cell(idx,3,detail).alignment=Alignment(wrap_text=True,vertical="top")
@@ -4474,7 +4493,7 @@ def _member_recap_export_excel(rows, filename):
         estimated_lines=sum(max(1, (len(line)+84)//85) for line in detail.splitlines())
         ws.row_dimensions[idx].height=max(90,min(420,estimated_lines*12+8))
         for c in ws[idx]: c.alignment=Alignment(wrap_text=True,vertical="top"); c.border=Border(bottom=thin)
-    ws.freeze_panes="A2"; ws.sheet_view.showGridLines=False
+    ws.freeze_panes="A3"; ws.sheet_view.showGridLines=False
     out=BytesIO(); wb.save(out); out.seek(0)
     return StreamingResponse(out,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition":f"attachment; filename={filename}"})
 
@@ -4516,7 +4535,7 @@ def _member_recap_export_pdf(rows, filename, title):
 
 @app.get("/pimpinan/personel/export/excel")
 def pimpinan_rekap_anggota_excel(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
-    return _member_recap_export_excel(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.xlsx")
+    return _member_recap_export_excel(_member_recap_rows("PIMPINAN",None,q),"rekap_anggota_555.xlsx","Rekap Seluruh Anggota 555")
 
 @app.get("/pimpinan/personel/export/pdf")
 def pimpinan_rekap_anggota_pdf(q: str = "", username: str = Depends(verify_pimpinan_or_admin)):
@@ -4524,19 +4543,33 @@ def pimpinan_rekap_anggota_pdf(q: str = "", username: str = Depends(verify_pimpi
 
 @app.get("/dpd/anggota/export/excel")
 def dpd_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
-    return _member_recap_export_excel(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.xlsx")
+    title = "Rekap Anggota Seluruh Kabupaten/Kota" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kabupaten/Kota Provinsi {identity.get('scope_province','')}"
+    return _member_recap_export_excel(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.xlsx",title)
 
 @app.get("/dpd/anggota/export/pdf")
 def dpd_rekap_anggota_pdf(q: str = "", identity: dict = Depends(require_verified_dpd_scope)):
-    return _member_recap_export_pdf(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.pdf","Rekap Anggota DPD")
+    title = "Rekap Anggota Seluruh Kabupaten Kota" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kabupaten Kota Provinsi {identity.get('scope_province','')}"
+    return _member_recap_export_pdf(_member_recap_rows("DPD",identity,q),"rekap_anggota_dpd.pdf",title)
 
 @app.get("/dpc/anggota/export/excel")
 def dpc_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
-    return _member_recap_export_excel(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.xlsx")
+    title = "Rekap Anggota Seluruh Kecamatan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kecamatan {identity.get('scope_regency','')}"
+    return _member_recap_export_excel(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.xlsx",title)
 
 @app.get("/dpc/anggota/export/pdf")
 def dpc_rekap_anggota_pdf(q: str = "", identity: dict = Depends(require_verified_dpc_scope)):
-    return _member_recap_export_pdf(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.pdf","Rekap Anggota DPC")
+    title = "Rekap Anggota Seluruh Kecamatan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Kecamatan {identity.get('scope_regency','')}"
+    return _member_recap_export_pdf(_member_recap_rows("DPC",identity,q),"rekap_anggota_dpc.pdf",title)
+
+@app.get("/dps/anggota/export/excel")
+def dps_rekap_anggota_excel(q: str = "", identity: dict = Depends(require_verified_dps_scope)):
+    title = "Rekap Anggota Seluruh Desa/Kelurahan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Desa/Kelurahan Kecamatan {identity.get('scope_district','')}"
+    return _member_recap_export_excel(_member_recap_rows("DPS",identity,q),"rekap_anggota_dps.xlsx",title)
+
+@app.get("/dps/anggota/export/pdf")
+def dps_rekap_anggota_pdf(q: str = "", identity: dict = Depends(require_verified_dps_scope)):
+    title = "Rekap Anggota Seluruh Desa Kelurahan" if identity.get('role') == 'SUPERUSER' else f"Rekap Anggota Seluruh Desa Kelurahan Kecamatan {identity.get('scope_district','')}"
+    return _member_recap_export_pdf(_member_recap_rows("DPS",identity,q),"rekap_anggota_dps.pdf",title)
 
 
 def _lead_map_embed(surveys, verifications, map_id="lead-dashboard-map"):
