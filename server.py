@@ -2164,7 +2164,7 @@ def _monitoring_dashboard_html(role: str, identity: dict):
       <div class='card'><small>Perlu perbaikan</small><div class='num'>{summary['revision']}</div></div>
       <div class='card'><small>Ditolak</small><div class='num'>{summary['rejected']}</div></div>
     </section>
-    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Target nasional 8.000 anggota terverifikasi</h2>
+    <section class='panel'><h2 style='margin-top:0;color:#5b1018'>Target Provinsi Riau 8.000 anggota terverifikasi</h2>
       <div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><b>{target['verified']:,} terverifikasi</b><b>{target['target']:,} target · {target['percentage']}%</b></div>
       <div class='bar' style='margin:10px 0'><span></span></div>
       <small>Angka target merupakan rekap nasional agregat. Dashboard ini tidak menampilkan identitas anggota di luar cakupan wilayah.</small>
