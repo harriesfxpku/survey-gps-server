@@ -52,7 +52,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.3-superuser-unified-session",
+    version="3.13.4-superuser-cookie-fix",
 )
 
 app.add_middleware(
@@ -2863,12 +2863,12 @@ def superuser_dashboard(
     sidps_session: str | None = Cookie(default=None),
 ):
     """Pusat navigasi SUPERUSER; menerbitkan cookie global agar semua dashboard mengenali sesi yang sama."""
+    new_session_token = None
     if not _superuser_session_username(sidps_session):
-        token = _issue_superuser_session(username)
-        response.set_cookie(
-            "sidps_session", token, max_age=43200, httponly=True,
-            secure=True, samesite="lax", path="/",
-        )
+        # Cookie dipasang pada HTMLResponse yang benar-benar dikembalikan.
+        # Sebelumnya cookie dipasang pada Response injeksi, tetapi fungsi
+        # mengembalikan HTMLResponse baru sehingga header Set-Cookie terbuang.
+        new_session_token = _issue_superuser_session(username)
     links = [
         ("Dashboard Admin", "/admin/dashboard", "Administrasi sistem, anggota, akun, dan data wilayah"),
         ("Dashboard Pimpinan", "/pimpinan", "Laporan survei, verifikasi, personel, dan peta"),
@@ -2887,7 +2887,13 @@ def superuser_dashboard(
     )
     page = f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>SUPERUSER | SIDPS 555</title>
     <style>*{{box-sizing:border-box}}body{{margin:0;background:#16090c;color:#f7eee5;font:15px/1.5 system-ui,Arial}}header{{padding:25px;background:linear-gradient(110deg,#19080c,#500813 60%,#26090e);border-bottom:2px solid #e0ad35}}main{{max-width:1100px;margin:auto;padding:22px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}.card{{display:flex;flex-direction:column;gap:8px;padding:19px;border:1px solid #5b3939;border-radius:13px;background:#211316;color:#f1cb72;text-decoration:none;min-height:105px}}.card span{{color:#d7c7bd;font-size:13px}}.note{{margin:18px 0;padding:14px;border-left:4px solid #e0ad35;background:#211316;color:#e9ded5}}small{{color:#c8b6ad}}</style></head><body><header><h1 style='margin:0;color:#f1cb72'>SUPERUSER · SIDPS 555</h1><div>Akses global aktif untuk {escape(username)}</div><small>Satu akun pengendali utama. Pembatasan akses akun wilayah lainnya tetap berlaku.</small></header><main><div class='note'>Gunakan akses global secara bertanggung jawab. Aktivitas SUPERUSER pada endpoint yang dilindungi dicatat dalam audit log.</div><form method='post' action='/superuser/logout' style='margin:0 0 18px'><button type='submit' style='padding:10px 16px;border:0;border-radius:8px;background:#d8b15a;color:#31090e;font-weight:700'>Keluar SUPERUSER</button></form><section class='grid'>{cards}</section></main></body></html>"""
-    return HTMLResponse(page)
+    page_response = HTMLResponse(page)
+    if new_session_token:
+        page_response.set_cookie(
+            "sidps_session", new_session_token, max_age=43200, httponly=True,
+            secure=True, samesite="lax", path="/",
+        )
+    return page_response
 
 
 
