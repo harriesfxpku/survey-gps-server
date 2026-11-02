@@ -3,6 +3,8 @@ import os
 import json
 import secrets
 import hashlib
+import hmac
+import base64
 import re
 import unicodedata
 from fastapi import UploadFile, File, Form, Cookie
@@ -52,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.4-superuser-cookie-fix",
+    version="3.13.5-dpd-dpc-hostless-auth",
 )
 
 app.add_middleware(
@@ -864,6 +866,60 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _hosted_role_session_secret() -> bytes:
+    """Gunakan rahasia server untuk menandatangani sesi DPD/DPC tanpa membuat akun officers."""
+    secret = os.environ.get("SIDPS_SESSION_SECRET", "").strip() or API_TOKEN.strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="SIDPS_SESSION_SECRET atau API_TOKEN belum dikonfigurasi di Hostless.")
+    return secret.encode("utf-8")
+
+
+def _issue_hosted_role_session(role: str, username: str, province: str, regency: str = "") -> str:
+    """Sesi browser DPD/DPC stateless, ditandatangani server dan berlaku 12 jam."""
+    payload = {
+        "u": username, "r": role, "p": province, "g": regency,
+        "exp": int((datetime.now(timezone.utc) + timedelta(hours=12)).timestamp()),
+    }
+    payload_part = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(_hosted_role_session_secret(), payload_part.encode("ascii"), hashlib.sha256).digest()
+    signature_part = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return payload_part + "." + signature_part
+
+
+def _hosted_role_session_identity(token: str | None) -> dict | None:
+    """Validasi sesi DPD/DPC dari Hostless; tidak membaca atau menulis tabel officers."""
+    if not token or "." not in token:
+        return None
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        expected = hmac.new(_hosted_role_session_secret(), payload_part.encode("ascii"), hashlib.sha256).digest()
+        supplied = base64.urlsafe_b64decode(signature_part + "=" * (-len(signature_part) % 4))
+        if not secrets.compare_digest(expected, supplied):
+            return None
+        raw = base64.urlsafe_b64decode(payload_part + "=" * (-len(payload_part) % 4))
+        payload = json.loads(raw.decode("utf-8"))
+        role = str(payload.get("r", "")).upper()
+        username = str(payload.get("u", "")).strip()
+        province = str(payload.get("p", "")).strip()
+        regency = str(payload.get("g", "")).strip()
+        if role not in {"DPD", "DPC"} or not username or int(payload.get("exp", 0)) <= int(datetime.now(timezone.utc).timestamp()):
+            return None
+        if not province or (role == "DPC" and not regency):
+            return None
+        return {
+            "auth_type": "hostless_role", "member_id": username,
+            "member_name": role, "role": role,
+            "region": province if role == "DPD" else f"{regency}, {province}",
+            "officer_id": None, "scope_province": province,
+            "scope_regency": regency if role == "DPC" else "",
+            "scope_district": "", "scope_village_name": "", "scope_verified": 1,
+        }
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError, base64.binascii.Error, HTTPException):
+        return None
+
+
 def get_request_identity(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -879,6 +935,9 @@ def get_request_identity(
     if _superuser_credentials_match(credentials):
         _record_superuser_activity(credentials.username, request, "APPLICATION_API_ACCESS")
         return _superuser_identity(credentials.username)
+    hosted_role_identity = _hosted_role_session_identity(sidps_session)
+    if hosted_role_identity:
+        return hosted_role_identity
     # API key lama tetap diterima untuk kompatibilitas dashboard/versi aplikasi lama.
     if API_TOKEN and api_key and secrets.compare_digest(api_key, API_TOKEN):
         return {"auth_type": "api_key", "role": "LEGACY_ADMIN"}
@@ -886,6 +945,9 @@ def get_request_identity(
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         if token:
+            hosted_role_identity = _hosted_role_session_identity(token)
+            if hosted_role_identity:
+                return hosted_role_identity
             with get_db() as connection:
                 row = connection.execute(
                     """
@@ -937,13 +999,19 @@ def get_officer_identity(
     if session_username:
         _record_superuser_activity(session_username, request, "GLOBAL_DASHBOARD_ACCESS")
         return _superuser_identity(session_username)
+    hosted_role_identity = _hosted_role_session_identity(sidps_session)
+    if hosted_role_identity:
+        return hosted_role_identity
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
     elif sidps_session:
         token = sidps_session.strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas.")
+        raise HTTPException(status_code=401, detail="Silakan login menggunakan akun petugas atau akun wilayah.")
+    hosted_role_identity = _hosted_role_session_identity(token)
+    if hosted_role_identity:
+        return hosted_role_identity
     with get_db() as connection:
         row = connection.execute(
             """
@@ -2119,18 +2187,34 @@ def dpd_browser_login_page():
 
 
 def _browser_role_login(role: str, member_id: str, password: str, request: Request):
-    result = officer_login(OfficerLogin(member_id=member_id, password=password), request)
-    if result.get("role") != role:
-        with get_db() as connection:
-            connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(result["access_token"]),))
-        raise HTTPException(status_code=403, detail=f"Dashboard ini khusus akun {role}.")
-    login_path = f"/{role.lower()}/login"
-    dashboard_path = f"/{role.lower()}/dashboard"
-    response = RedirectResponse(url=dashboard_path, status_code=303)
-    response.set_cookie("sidps_session", result["access_token"], max_age=43200,
-                        httponly=True, secure=True, samesite="lax", path="/")
-    return response
+    """Login DPD/DPC memakai kredensial Hostless, bukan tabel officers."""
+    role = role.upper().strip()
+    if role not in {"DPD", "DPC"}:
+        raise HTTPException(status_code=400, detail="Role login wilayah tidak dikenal.")
 
+    expected_username = os.environ.get(f"{role}_USERNAME", "").strip()
+    expected_password = os.environ.get(f"{role}_PASSWORD", "")
+    if not expected_username or not expected_password:
+        raise HTTPException(status_code=503, detail=f"Kredensial {role} belum dikonfigurasi di Environment Variables Hostless.")
+
+    username_ok = secrets.compare_digest(member_id.strip().encode("utf-8"), expected_username.encode("utf-8"))
+    password_ok = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
+    if not (username_ok and password_ok):
+        raise HTTPException(status_code=401, detail=f"ID atau kata sandi {role} salah.")
+
+    # Cakupan wilayah berasal dari Environment Variables, bukan record petugas.
+    province = os.environ.get(f"{role}_PROVINCE", "").strip()
+    regency = os.environ.get("DPC_REGENCY", "").strip() if role == "DPC" else ""
+    if not province:
+        raise HTTPException(status_code=503, detail=f"{role}_PROVINCE belum dikonfigurasi di Hostless.")
+    if role == "DPC" and not regency:
+        raise HTTPException(status_code=503, detail="DPC_REGENCY belum dikonfigurasi di Hostless.")
+
+    token = _issue_hosted_role_session(role, expected_username, province, regency)
+    response = RedirectResponse(url=f"/{role.lower()}/dashboard", status_code=303)
+    response.set_cookie("sidps_session", token, max_age=43200, httponly=True,
+                        secure=True, samesite="lax", path="/")
+    return response
 
 @app.post("/dpc/login", response_class=HTMLResponse)
 def dpc_browser_login(request: Request, member_id: str = Form(...), password: str = Form(...)):
