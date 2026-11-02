@@ -1840,8 +1840,8 @@ def dps_browser_login_page():
 
 
 @app.post("/dps/login", response_class=HTMLResponse)
-def dps_browser_login(member_id: str = Form(...), password: str = Form(...)):
-    result = officer_login(OfficerLogin(member_id=member_id, password=password))
+def dps_browser_login(request: Request, member_id: str = Form(...), password: str = Form(...)):
+    result = officer_login(OfficerLogin(member_id=member_id, password=password), request)
     if result.get("role") != "DPS":
         with get_db() as connection:
             connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(result["access_token"]),))
@@ -2042,8 +2042,8 @@ def dpd_browser_login_page():
     return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login DPD</title><style>body{margin:0;background:#f4f0eb;font:15px system-ui;color:#302729;display:grid;min-height:100vh;place-items:center}.box{width:min(420px,calc(100% - 32px));background:white;padding:28px;border-radius:15px;border-top:5px solid #d8b15a}h1{color:#5b1018}label{display:block;margin:15px 0 6px;font-weight:650}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d5cbc5;border-radius:8px;font:inherit}button{margin-top:20px;width:100%;padding:12px;background:#5b1018;color:white;border:0;border-radius:8px;font:inherit}</style></head><body><form class='box' method='post' action='/dpd/login'><h1>Login Monitoring DPD</h1><label>ID Member</label><input name='member_id' required><label>Kata sandi</label><input name='password' type='password' required><button>Masuk</button></form></body></html>""")
 
 
-def _browser_role_login(role: str, member_id: str, password: str):
-    result = officer_login(OfficerLogin(member_id=member_id, password=password))
+def _browser_role_login(role: str, member_id: str, password: str, request: Request):
+    result = officer_login(OfficerLogin(member_id=member_id, password=password), request)
     if result.get("role") != role:
         with get_db() as connection:
             connection.execute("DELETE FROM officer_sessions WHERE token_hash=%s", (_token_hash(result["access_token"]),))
@@ -2057,13 +2057,13 @@ def _browser_role_login(role: str, member_id: str, password: str):
 
 
 @app.post("/dpc/login", response_class=HTMLResponse)
-def dpc_browser_login(member_id: str = Form(...), password: str = Form(...)):
-    return _browser_role_login("DPC", member_id, password)
+def dpc_browser_login(request: Request, member_id: str = Form(...), password: str = Form(...)):
+    return _browser_role_login("DPC", member_id, password, request)
 
 
 @app.post("/dpd/login", response_class=HTMLResponse)
-def dpd_browser_login(member_id: str = Form(...), password: str = Form(...)):
-    return _browser_role_login("DPD", member_id, password)
+def dpd_browser_login(request: Request, member_id: str = Form(...), password: str = Form(...)):
+    return _browser_role_login("DPD", member_id, password, request)
 
 
 @app.post("/dpc/logout")
