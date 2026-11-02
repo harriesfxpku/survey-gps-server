@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.5-dpd-dpc-hostless-auth",
+    version="3.13.6-dpd-dpc-login-scope-separation",
 )
 
 app.add_middleware(
@@ -906,8 +906,9 @@ def _hosted_role_session_identity(token: str | None) -> dict | None:
         regency = str(payload.get("g", "")).strip()
         if role not in {"DPD", "DPC"} or not username or int(payload.get("exp", 0)) <= int(datetime.now(timezone.utc).timestamp()):
             return None
-        if not province or (role == "DPC" and not regency):
-            return None
+        # Kredensial login dan cakupan wilayah adalah dua tahap berbeda.
+        # Sesi tetap dikenali meskipun cakupan belum dikonfigurasi;
+        # endpoint dashboard akan menolak akses data sampai cakupan sah.
         return {
             "auth_type": "hostless_role", "member_id": username,
             "member_name": role, "role": role,
@@ -2202,13 +2203,10 @@ def _browser_role_login(role: str, member_id: str, password: str, request: Reque
     if not (username_ok and password_ok):
         raise HTTPException(status_code=401, detail=f"ID atau kata sandi {role} salah.")
 
-    # Cakupan wilayah berasal dari Environment Variables, bukan record petugas.
+    # Login hanya mengautentikasi kredensial Hostless.
+    # Cakupan wilayah diperiksa terpisah oleh guard dashboard.
     province = os.environ.get(f"{role}_PROVINCE", "").strip()
     regency = os.environ.get("DPC_REGENCY", "").strip() if role == "DPC" else ""
-    if not province:
-        raise HTTPException(status_code=503, detail=f"{role}_PROVINCE belum dikonfigurasi di Hostless.")
-    if role == "DPC" and not regency:
-        raise HTTPException(status_code=503, detail="DPC_REGENCY belum dikonfigurasi di Hostless.")
 
     token = _issue_hosted_role_session(role, expected_username, province, regency)
     response = RedirectResponse(url=f"/{role.lower()}/dashboard", status_code=303)
