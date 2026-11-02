@@ -54,7 +54,7 @@ api_key_header = APIKeyHeader(
 app = FastAPI(
     title="SIDPS 555 API",
     description="Server pusat SIDPS 555 dengan struktur wilayah DPD, DPC, DPS, dan DPSS.",
-    version="3.13.6-dpd-dpc-login-scope-separation",
+    version="3.13.7-dpc-multi-account-json",
 )
 
 app.add_middleware(
@@ -2187,27 +2187,77 @@ def dpd_browser_login_page():
     return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login DPD</title><style>body{margin:0;background:#f4f0eb;font:15px system-ui;color:#302729;display:grid;min-height:100vh;place-items:center}.box{width:min(420px,calc(100% - 32px));background:white;padding:28px;border-radius:15px;border-top:5px solid #d8b15a}h1{color:#5b1018}label{display:block;margin:15px 0 6px;font-weight:650}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d5cbc5;border-radius:8px;font:inherit}button{margin-top:20px;width:100%;padding:12px;background:#5b1018;color:white;border:0;border-radius:8px;font:inherit}</style></head><body><form class='box' method='post' action='/dpd/login'><h1>Login Monitoring DPD</h1><label>ID Member</label><input name='member_id' required><label>Kata sandi</label><input name='password' type='password' required><button>Masuk</button></form></body></html>""")
 
 
+def _load_dpc_accounts() -> list[dict]:
+    """Baca daftar akun DPC dari satu Environment Variable JSON di Hostless."""
+    raw = os.environ.get("DPC_ACCOUNTS_JSON", "").strip()
+    if not raw:
+        raise HTTPException(status_code=503, detail="DPC_ACCOUNTS_JSON belum dikonfigurasi di Environment Variables Hostless.")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=503, detail="Format DPC_ACCOUNTS_JSON tidak valid. Periksa kembali JSON di Hostless.")
+    if not isinstance(parsed, list) or not parsed:
+        raise HTTPException(status_code=503, detail="DPC_ACCOUNTS_JSON harus berupa array JSON berisi daftar akun DPC.")
+
+    accounts = []
+    seen_usernames = set()
+    for index, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=503, detail=f"Data akun DPC nomor {index} harus berupa objek JSON.")
+        username = str(item.get("username", "")).strip()
+        password = str(item.get("password", ""))
+        province = str(item.get("province", "")).strip()
+        regency = str(item.get("regency", "")).strip()
+        if not username or not password or not province or not regency:
+            raise HTTPException(status_code=503, detail=f"Akun DPC nomor {index} wajib memiliki username, password, province, dan regency.")
+        username_key = username.casefold()
+        if username_key in seen_usernames:
+            raise HTTPException(status_code=503, detail=f"Username DPC duplikat ditemukan pada konfigurasi: {username}.")
+        seen_usernames.add(username_key)
+        accounts.append({
+            "username": username,
+            "password": password,
+            "province": province,
+            "regency": regency,
+        })
+    return accounts
+
+
 def _browser_role_login(role: str, member_id: str, password: str, request: Request):
     """Login DPD/DPC memakai kredensial Hostless, bukan tabel officers."""
     role = role.upper().strip()
     if role not in {"DPD", "DPC"}:
         raise HTTPException(status_code=400, detail="Role login wilayah tidak dikenal.")
 
-    expected_username = os.environ.get(f"{role}_USERNAME", "").strip()
-    expected_password = os.environ.get(f"{role}_PASSWORD", "")
-    if not expected_username or not expected_password:
-        raise HTTPException(status_code=503, detail=f"Kredensial {role} belum dikonfigurasi di Environment Variables Hostless.")
+    submitted_username = member_id.strip()
+    if role == "DPC":
+        # Setiap DPC memperoleh cakupan provinsi dan kabupaten/kota dari entri akunnya sendiri.
+        accounts = _load_dpc_accounts()
+        account = next((item for item in accounts if secrets.compare_digest(
+            submitted_username.encode("utf-8"), item["username"].encode("utf-8")
+        )), None)
+        if account is None or not secrets.compare_digest(
+            password.encode("utf-8"), account["password"].encode("utf-8")
+        ):
+            raise HTTPException(status_code=401, detail="ID atau kata sandi DPC salah.")
+        expected_username = account["username"]
+        province = account["province"]
+        regency = account["regency"]
+    else:
+        # DPD tetap memakai satu akun provinsi melalui DPD_USERNAME/PASSWORD/PROVINCE.
+        expected_username = os.environ.get("DPD_USERNAME", "").strip()
+        expected_password = os.environ.get("DPD_PASSWORD", "")
+        if not expected_username or not expected_password:
+            raise HTTPException(status_code=503, detail="Kredensial DPD belum dikonfigurasi di Environment Variables Hostless.")
+        username_ok = secrets.compare_digest(submitted_username.encode("utf-8"), expected_username.encode("utf-8"))
+        password_ok = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
+        if not (username_ok and password_ok):
+            raise HTTPException(status_code=401, detail="ID atau kata sandi DPD salah.")
+        province = os.environ.get("DPD_PROVINCE", "").strip()
+        regency = ""
 
-    username_ok = secrets.compare_digest(member_id.strip().encode("utf-8"), expected_username.encode("utf-8"))
-    password_ok = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
-    if not (username_ok and password_ok):
-        raise HTTPException(status_code=401, detail=f"ID atau kata sandi {role} salah.")
-
-    # Login hanya mengautentikasi kredensial Hostless.
-    # Cakupan wilayah diperiksa terpisah oleh guard dashboard.
-    province = os.environ.get(f"{role}_PROVINCE", "").strip()
-    regency = os.environ.get("DPC_REGENCY", "").strip() if role == "DPC" else ""
-
+    # Cakupan DPC berasal dari akun yang cocok; DPD tetap berasal dari DPD_PROVINCE.
+    # DPC_REGENCY tidak lagi digunakan.
     token = _issue_hosted_role_session(role, expected_username, province, regency)
     response = RedirectResponse(url=f"/{role.lower()}/dashboard", status_code=303)
     response.set_cookie("sidps_session", token, max_age=43200, httponly=True,
