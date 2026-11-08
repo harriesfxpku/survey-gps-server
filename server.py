@@ -46,6 +46,7 @@ elif DATABASE_URL.startswith("postgresql+psycopg://"):
 
 API_TOKEN = os.environ.get("API_TOKEN", "")
 SIMPATI_INTEGRATION_TOKEN = os.environ.get("SIMPATI_INTEGRATION_TOKEN", "").strip()
+SIMPATI_API_URL = os.environ.get("SIMPATI_API_URL", "").strip().rstrip("/")
 
 simpati_api_key_header = APIKeyHeader(name="X-SIMPATI-Token", auto_error=False)
 
@@ -520,6 +521,35 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS officer_sessions (
                 id BIGSERIAL PRIMARY KEY,
                 officer_id BIGINT NOT NULL REFERENCES officers(id) ON DELETE CASCADE,
+                token_hash VARCHAR(64) UNIQUE NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        # Akun Admin Survei merupakan proyeksi akun yang dibuat Superadmin SIMPATI.
+        # Tabel ini terpisah dari officers agar identitas anggota/petugas tidak tercampur.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS survey_admin_accounts (
+                id UUID PRIMARY KEY,
+                username VARCHAR(80) UNIQUE NOT NULL,
+                full_name VARCHAR(150) NOT NULL,
+                role VARCHAR(10) NOT NULL CHECK (role IN ('DPD','DPC','DPS','DPSS')),
+                scope_code VARCHAR(20) NOT NULL,
+                scope_province VARCHAR(100) NOT NULL DEFAULT '',
+                scope_regency VARCHAR(100) NOT NULL DEFAULT '',
+                scope_district VARCHAR(100) NOT NULL DEFAULT '',
+                scope_village VARCHAR(100) NOT NULL DEFAULT '',
+                password_salt VARCHAR(64) NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS survey_admin_sessions (
+                id BIGSERIAL PRIMARY KEY,
+                admin_id UUID NOT NULL REFERENCES survey_admin_accounts(id) ON DELETE CASCADE,
                 token_hash VARCHAR(64) UNIQUE NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -3154,91 +3184,225 @@ def superuser_audit_dashboard(username: str = Depends(verify_superuser)):
     return HTMLResponse("""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Audit SUPERUSER | SIDPS</title><style>body{margin:0;background:#16090c;color:#f7eee5;font:14px system-ui}header{padding:22px;background:#31090e;border-bottom:2px solid #e0ad35}main{max-width:1100px;margin:auto;padding:20px}.panel{background:#211316;border:1px solid #5b3939;border-radius:12px;padding:16px;overflow:auto}table{width:100%;border-collapse:collapse;min-width:700px}td,th{padding:10px;border-bottom:1px solid #5b3939;text-align:left}th{color:#f1cb72}a{color:#f1cb72}</style></head><body><header><h1>Audit Aktivitas SUPERUSER</h1><a href='/superuser/dashboard'>Kembali ke dashboard SUPERUSER</a></header><main><section class='panel'><p>Menampilkan maksimal 200 aktivitas terbaru. Kredensial dan isi data pribadi tidak dicatat.</p><table><thead><tr><th>Waktu</th><th>Akun</th><th>Aktivitas</th><th>Metode</th><th>Endpoint</th></tr></thead><tbody>""" + body + """</tbody></table></section></main></body></html>""")
 
 
-@app.get("/admin/dashboard", response_class=HTMLResponse)
-def admin_main_dashboard(username: str = Depends(verify_admin)):
-    """Halaman utama khusus admin untuk mengakses seluruh fungsi administrasi."""
+class SimpatiSurveyAdminSync(BaseModel):
+    simpati_admin_id: str = Field(min_length=36, max_length=36)
+    username: str = Field(min_length=3, max_length=80)
+    full_name: str = Field(min_length=1, max_length=150)
+    role: str = Field(min_length=3, max_length=4)
+    scope_code: str = Field(min_length=2, max_length=20)
+    scope_province: str = Field(default="", max_length=100)
+    scope_regency: str = Field(default="", max_length=100)
+    scope_district: str = Field(default="", max_length=100)
+    scope_village: str = Field(default="", max_length=100)
+    password: str = Field(default="", max_length=200)
+    active: bool = True
+    actor: str = Field(default="SIMPATI555", max_length=150)
+
+
+@app.post("/api/integrasi/simpati/admin-survei", tags=["Integrasi SIMPATI"], summary="Sinkronisasi akun Admin Survei dari SIMPATI 555")
+def sync_simpati_survey_admin(payload: SimpatiSurveyAdminSync, _: bool = Depends(verify_simpati_integration_token)):
+    try:
+        external_id = str(uuid.UUID(payload.simpati_admin_id))
+    except (ValueError, AttributeError):
+        raise HTTPException(422, "ID Admin Survei SIMPATI harus UUID valid.")
+    role = payload.role.strip().upper()
+    depth = {"DPD":1,"DPC":2,"DPS":3,"DPSS":4}.get(role)
+    if not depth:
+        raise HTTPException(422, "Level Admin Survei tidak valid.")
+    parts = payload.scope_code.split(".")
+    if len(parts) != depth or any(not x.isdigit() for x in parts):
+        raise HTTPException(422, "Kode cakupan wilayah tidak sesuai level akun.")
+    required = [payload.scope_province, payload.scope_regency, payload.scope_district, payload.scope_village]
+    if any(not str(required[i]).strip() for i in range(depth)):
+        raise HTTPException(422, "Nama wilayah resmi belum lengkap.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{2,79}", payload.username.strip()):
+        raise HTTPException(422, "Username Admin Survei tidak valid.")
     with get_db() as connection:
-        stats = connection.execute("""
-            SELECT
-                (SELECT COUNT(*) FROM organization_member_registrations) AS registrations_total,
-                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='pending') AS registrations_pending,
-                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='revision') AS registrations_revision,
-                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='approved') AS registrations_approved,
-                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='rejected') AS registrations_rejected,
-                (SELECT COUNT(*) FROM officers) AS accounts_total,
-                (SELECT COUNT(*) FROM officers WHERE active=1) AS accounts_active,
-                (SELECT COUNT(*) FROM officers WHERE active<>1 OR active IS NULL) AS accounts_inactive,
-                (SELECT COUNT(*) FROM surveys) AS surveys_total,
-                (SELECT COUNT(*) FROM survey_verifications) AS verifications_total
-        """).fetchone()
-        recent = connection.execute("""
-            SELECT full_name, registration_code, org_level, org_position, region, status, created_at
-            FROM organization_member_registrations
-            WHERE status IN ('pending','revision')
-            ORDER BY created_at DESC
-            LIMIT 6
-        """).fetchall()
+        connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("SIMPATI-ADMIN:" + external_id,))
+        old = connection.execute("SELECT id,password_salt,password_hash,active,scope_code,username FROM survey_admin_accounts WHERE id=%s FOR UPDATE", (external_id,)).fetchone()
+        if payload.active and not old and len(payload.password) < 12:
+            raise HTTPException(422, "Password awal Admin Survei minimal 12 karakter.")
+        if payload.password and len(payload.password) < 12:
+            raise HTTPException(422, "Password Admin Survei minimal 12 karakter.")
+        if old and old["username"].casefold() != payload.username.strip().casefold():
+            duplicate = connection.execute("SELECT id FROM survey_admin_accounts WHERE lower(username)=lower(%s) AND id<>%s", (payload.username.strip(), external_id)).fetchone()
+            if duplicate: raise HTTPException(409, "Username Admin Survei sudah digunakan.")
+        if old:
+            params = [payload.username.strip(),payload.full_name.strip(),role,payload.scope_code,
+                      payload.scope_province.strip(),payload.scope_regency.strip(),payload.scope_district.strip(),payload.scope_village.strip(),int(payload.active)]
+            password_sql = ""
+            if payload.password:
+                salt=secrets.token_hex(16); password_sql=",password_salt=%s,password_hash=%s"; params.extend([salt,_password_hash(payload.password,salt)])
+            params.append(external_id)
+            connection.execute(f"""UPDATE survey_admin_accounts SET username=%s,full_name=%s,role=%s,scope_code=%s,
+                scope_province=%s,scope_regency=%s,scope_district=%s,scope_village=%s,active=%s,updated_at=NOW(){password_sql} WHERE id=%s""",tuple(params))
+            changed = (old["scope_code"] != payload.scope_code or old["username"] != payload.username.strip() or bool(old["active"]) != payload.active or bool(payload.password))
+            if changed: connection.execute("DELETE FROM survey_admin_sessions WHERE admin_id=%s", (external_id,))
+        else:
+            salt=secrets.token_hex(16)
+            connection.execute("""INSERT INTO survey_admin_accounts
+                (id,username,full_name,role,scope_code,scope_province,scope_regency,scope_district,scope_village,password_salt,password_hash,active)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (external_id,payload.username.strip(),payload.full_name.strip(),role,payload.scope_code,payload.scope_province.strip(),payload.scope_regency.strip(),payload.scope_district.strip(),payload.scope_village.strip(),salt,_password_hash(payload.password,salt),int(payload.active)))
+    return {"message":"Akun Admin Survei berhasil disinkronkan.","simpati_admin_id":external_id,"username":payload.username,"role":role,"active":payload.active}
 
-    def stat(key):
-        return int((stats or {}).get(key) or 0)
 
-    recent_rows = []
-    for row in recent:
-        status = str(row.get('status') or '')
-        status_label = 'Perlu perbaikan' if status == 'revision' else 'Menunggu verifikasi'
-        status_class = 'revision' if status == 'revision' else 'pending'
-        recent_rows.append(
-            "<tr>"
-            f"<td><b>{escape(str(row.get('full_name') or '-'))}</b><br><small>{escape(str(row.get('registration_code') or '-'))}</small></td>"
-            f"<td>{escape(str(row.get('org_level') or '-'))} · {escape(str(row.get('org_position') or '-'))}</td>"
-            f"<td>{escape(str(row.get('region') or '-'))}</td>"
-            f"<td><span class='badge {status_class}'>{status_label}</span></td>"
-            "</tr>"
-        )
-    recent_html = ''.join(recent_rows) or "<tr><td colspan='4' class='empty'>Tidak ada pendaftaran yang menunggu tindakan.</td></tr>"
+def _survey_admin_identity(token: str | None):
+    if not token: return None
+    with get_db() as connection:
+        row=connection.execute("""SELECT a.* FROM survey_admin_sessions s JOIN survey_admin_accounts a ON a.id=s.admin_id
+            WHERE s.token_hash=%s AND s.expires_at>NOW() AND a.active=1""",(_token_hash(token),)).fetchone()
+    return dict(row) if row else None
 
-    return HTMLResponse(f"""<!doctype html>
-<html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Dashboard Utama Admin | Triple 555</title>
-<style>
-:root{{--maroon:#650b18;--deep:#17070b;--gold:#e0ad35;--paper:#f4f0eb;--ink:#f8f1e8;--muted:#b8a8a0;--line:#503337;--green:#39a66a;--red:#b82b3b}}
-*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(ellipse at top right,#35151b 0,#16090c 55%,#100709 100%);color:var(--ink);font:14px/1.5 Inter,system-ui,Arial,sans-serif}}
-.wrap{{width:100%;max-width:none;margin:0;padding:0 0 36px}}.hero{{min-height:104px;background:linear-gradient(110deg,#19080c,#500813 55%,#26090e);color:white;padding:16px 28px;border-bottom:2px solid var(--gold);display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;border-radius:0;box-shadow:0 8px 30px #0006}}
-.brand{{display:flex;align-items:center;gap:16px}}.brand img{{width:66px;height:66px;object-fit:contain;border-radius:50%;background:#2b1114;padding:3px;border:2px solid var(--gold)}}h1{{margin:0 0 4px;font-size:clamp(22px,3vw,30px);color:#f7d77f}}.hero p{{margin:0;color:#e8d8c7}}.user{{background:#ffffff12;border:1px solid #d8b15a66;padding:9px 13px;border-radius:10px;font-size:13px;color:#f6e8cf}}
-.layout{{display:grid;grid-template-columns:224px minmax(0,1fr);gap:22px;max-width:1700px;margin:0 auto;padding:22px 24px}}.sidebar{{background:linear-gradient(180deg,#26090f,#14080b);border:1px solid #6e3a3d;border-radius:16px;padding:16px 12px;min-height:calc(100vh - 150px);display:flex;flex-direction:column;gap:7px;box-shadow:0 12px 28px #0005}}.sidebar .side-label{{font-size:10px;letter-spacing:1.8px;color:#c9a65a;padding:8px 12px 10px;text-transform:uppercase}}.sidebar a{{display:flex;align-items:center;gap:11px;color:#f5e9dc;text-decoration:none;padding:12px 13px;border-radius:9px;font-weight:650;border:1px solid transparent}}.sidebar a:hover,.sidebar a.active{{background:linear-gradient(100deg,#e9b83f,#b87a16);color:#28130b}}
-.main-content{{min-width:0;padding:0 2px 20px}}.section-title{{margin:8px 0 13px;font-size:18px;color:#f2cf78}}.stats{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}}.stat,.card,.panel{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-radius:13px;box-shadow:0 8px 20px #0003;color:#f7eee5}}.stat{{padding:16px;position:relative;overflow:hidden}}.stat span{{display:block;color:#c9b8ad;font-size:12px;font-weight:650}}.stat strong{{display:block;font-size:29px;color:#f2c34f;margin-top:5px;line-height:1.2}}.stat small{{color:#a99b93}}
-.menu{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.card{{padding:18px;display:flex;gap:14px;align-items:flex-start}}.icon{{width:45px;height:45px;flex:0 0 45px;border-radius:12px;background:linear-gradient(145deg,#e9bd51,#a96d16);color:#2a1609;display:grid;place-items:center;font-size:22px}}.card h3{{margin:0 0 5px;color:#f1cb72;font-size:16px}}.card p{{margin:0 0 13px;color:#c0b2aa;font-size:13px}}.btn{{display:inline-block;background:linear-gradient(110deg,#f0c85e,#bd821b);color:#24130a;text-decoration:none;padding:9px 13px;border-radius:8px;font-weight:800;font-size:13px}}
-.panel{{padding:17px;margin-top:15px;overflow:hidden}}.panel h2{{font-size:17px;color:#f1cb72;margin:0 0 12px}}.tablewrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:650px}}th,td{{text-align:left;padding:11px 9px;border-bottom:1px solid #493235;vertical-align:top}}th{{font-size:11px;text-transform:uppercase;color:#e7c46e;background:#301b20}}td{{color:#eee3d9}}small{{color:#b8a8a0}}.badge{{display:inline-block;border-radius:20px;padding:4px 9px;font-size:11px;font-weight:750}}.pending{{background:#604316;color:#ffdf8a}}.revision{{background:#62202a;color:#ffc0c6}}.empty{{text-align:center;color:#b8a8a0;padding:22px}}.foot{{margin-top:22px;text-align:center;color:#988780;font-size:12px}}
-@media(max-width:1200px){{.stats{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:800px){{.layout{{grid-template-columns:1fr;padding:14px}}.sidebar{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.sidebar .side-label{{display:none}}.sidebar a{{flex:0 0 auto}}}}@media(max-width:620px){{.hero{{padding:15px}}.brand img{{width:54px;height:54px}}.stats{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.stat{{padding:12px}}.stat strong{{font-size:23px}}.menu{{grid-template-columns:1fr}}.card{{padding:14px}}.layout{{padding:10px}}}}
-</style></head><body><main class='wrap'>
-<header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>555 · ADMIN CONTROL CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Pusat administrasi organisasi</p></div></div><div class='user'>Administrator: <b>{escape(username)}</b></div></header>
-<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Rekap Anggota</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin/cakupan-wilayah'>⌖ &nbsp; Cakupan Wilayah</a><a href='/admin/master-data-wilayah'>▦ &nbsp; Master Data Wilayah</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
-<h2 class='section-title'>Ringkasan Sistem</h2>
-<section class='stats'>
-<div class='stat'><span>Total Pendaftaran Anggota</span><strong>{stat('registrations_total')}</strong><small>Seluruh status</small></div>
-<div class='stat'><span>Menunggu Verifikasi</span><strong>{stat('registrations_pending')}</strong><small>Perlu diperiksa admin</small></div>
-<div class='stat'><span>Perlu Perbaikan</span><strong>{stat('registrations_revision')}</strong><small>Menunggu pembaruan data</small></div>
-<div class='stat'><span>Anggota Disetujui</span><strong>{stat('registrations_approved')}</strong><small>Masuk daftar anggota terverifikasi</small></div>
-<div class='stat'><span>Pendaftaran Ditolak</span><strong>{stat('registrations_rejected')}</strong><small>Sudah diputuskan</small></div>
-<div class='stat'><span>Total Akun Aplikasi</span><strong>{stat('accounts_total')}</strong><small>Petugas yang pernah diberi akses</small></div>
-<div class='stat'><span>Akun Aktif</span><strong>{stat('accounts_active')}</strong><small>Dapat menggunakan aplikasi</small></div>
-<div class='stat'><span>Akun Nonaktif</span><strong>{stat('accounts_inactive')}</strong><small>Akses sedang dicabut</small></div>
-<div class='stat'><span>Total Survei</span><strong>{stat('surveys_total')}</strong><small>Data survei tersimpan</small></div>
-<div class='stat'><span>Hasil Verifikasi DPS</span><strong>{stat('verifications_total')}</strong><small>Verifikasi tersimpan</small></div>
-</section>
-<h2 class='section-title'>Menu Administrasi</h2>
-<section class='menu'>
-<article class='card'><div class='icon'>📝</div><div><h3>Verifikasi Pendaftaran Anggota</h3><p>Periksa pendaftaran, edit data yang keliru, setujui, minta perbaikan, atau tolak pendaftaran.</p><a class='btn' href='/admin/pendaftaran-anggota'>Buka Verifikasi</a></div></article>
-<article class='card'><div class='icon'>🗂️</div><div><h3>Daftar Seluruh Anggota</h3><p>Lihat seluruh anggota DPS dan DPSS yang sudah disetujui, termasuk foto profil dan dokumen identitas.</p><a class='btn' href='/admin/data-anggota'>Buka Data Anggota</a></div></article>
-<article class='card'><div class='icon'>👥</div><div><h3>Data Personel Petugas</h3><p>Lihat dan kelola data profil petugas yang sudah memiliki akun aplikasi.</p><a class='btn' href='/admin/data-personel'>Buka Data Personel</a></div></article>
-<article class='card'><div class='icon'>🔐</div><div><h3>Kelola Akses Aplikasi</h3><p>Pilih anggota terverifikasi yang ditugaskan, berikan akses, aktifkan kembali, atau cabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses</a></div></article>
-<article class='card'><div class='icon'>🧭</div><div><h3>Penetapan Cakupan Wilayah</h3><p>Tetapkan wilayah resmi akun DPD, DPC, DPS, dan DPSS berdasarkan dokumen organisasi.</p><a class='btn' href='/admin/cakupan-wilayah'>Atur Cakupan Wilayah</a></div></article>
-<article class='card'><div class='icon'>🗺️</div><div><h3>Master Data Wilayah</h3><p>Kelola daftar resmi provinsi, kabupaten/kota, kecamatan, dan desa/kelurahan untuk pencocokan pendaftaran dan penugasan.</p><a class='btn' href='/admin/master-data-wilayah'>Kelola Data Wilayah</a></div></article>
-<article class='card'><div class='icon'>📍</div><div><h3>Data Survei dan Media</h3><p>Pantau data survei, lokasi GPS, dokumen, foto, video, dan hasil verifikasi yang tersimpan.</p><a class='btn' href='/admin'>Buka Data Survei</a></div></article>
-</section>
-<section class='panel'><h2>Pendaftaran yang Memerlukan Tindakan</h2><div class='tablewrap'><table><thead><tr><th>Nama / Kode</th><th>Struktur / Jabatan</th><th>Wilayah</th><th>Status</th></tr></thead><tbody>{recent_html}</tbody></table></div><p style='margin:14px 0 0'><a class='btn' href='/admin/pendaftaran-anggota?status=pending'>Periksa Pendaftaran</a></p></section>
-<div class='foot'>Dashboard Administrasi Triple 555 · Data ditampilkan langsung dari server</div>
-</div></div></main></body></html>""")
+
+def require_survey_admin(request: Request, survey_admin_session: str | None = Cookie(default=None)):
+    account=_survey_admin_identity(survey_admin_session)
+    if not account:
+        raise HTTPException(303,headers={"Location":"/admin-survei/login"})
+    return account
+
+
+@app.get("/admin-survei/login", response_class=HTMLResponse)
+def survey_admin_login_page(message: str = ""):
+    return HTMLResponse(f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Login Admin Survei</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at top right,#35151b,#100709);font:15px Arial;color:#f8eee3}}main{{width:min(420px,calc(100% - 32px));background:#261619;border:1px solid #765047;border-radius:16px;padding:28px;box-sizing:border-box}}h1{{color:#f0cb72}}label{{display:block;margin:14px 0 5px}}input{{width:100%;padding:12px;box-sizing:border-box;background:#180e11;color:#fff;border:1px solid #624449;border-radius:8px}}button{{margin-top:18px;width:100%;padding:12px;background:#e0ad35;border:0;border-radius:8px;font-weight:bold}}.err{{color:#ffc0a8}}</style></head><body><main><h1>Admin Survei 555</h1><p>Masuk menggunakan akun yang dibuat oleh Superadmin SIMPATI 555.</p><p class='err'>{escape(message)}</p><form method='post' action='/admin-survei/login'><label>ID Login</label><input name='username' required autocomplete='username'><label>Password</label><input type='password' name='password' required autocomplete='current-password'><button type='submit'>Masuk Dashboard</button></form></main></body></html>""")
+
+
+@app.post("/admin-survei/login")
+def survey_admin_login(username: str = Form(""), password: str = Form("")):
+    username=username.strip()
+    with get_db() as connection:
+        account=connection.execute("SELECT * FROM survey_admin_accounts WHERE lower(username)=lower(%s) AND active=1",(username,)).fetchone()
+        if not account or not _verify_password(password,account["password_salt"],account["password_hash"]):
+            return RedirectResponse("/admin-survei/login?message="+quote("ID login atau password salah."),status_code=303)
+        token=secrets.token_urlsafe(48)
+        connection.execute("DELETE FROM survey_admin_sessions WHERE expires_at<=NOW()")
+        connection.execute("INSERT INTO survey_admin_sessions(admin_id,token_hash,expires_at) VALUES(%s,%s,%s)",(account["id"],_token_hash(token),datetime.now(timezone.utc)+timedelta(hours=12)))
+    response=RedirectResponse("/admin/dashboard",status_code=303)
+    response.set_cookie("survey_admin_session",token,max_age=43200,httponly=True,secure=True,samesite="lax",path="/")
+    return response
+
+
+@app.post("/admin-survei/password")
+def survey_admin_change_password(password_lama: str = Form(""), password_baru: str = Form(""),
+                                konfirmasi_password: str = Form(""), account=Depends(require_survey_admin),
+                                survey_admin_session: str | None = Cookie(default=None)):
+    if not _verify_password(password_lama, account["password_salt"], account["password_hash"]):
+        raise HTTPException(400, "Password saat ini tidak sesuai.")
+    if len(password_baru) < 12 or len(password_baru) > 200:
+        raise HTTPException(400, "Password baru minimal 12 karakter.")
+    if not secrets.compare_digest(password_baru, konfirmasi_password):
+        raise HTTPException(400, "Konfirmasi password baru tidak sama.")
+    if _verify_password(password_baru, account["password_salt"], account["password_hash"]):
+        raise HTTPException(400, "Password baru harus berbeda dari password saat ini.")
+    if not SIMPATI_API_URL or not SIMPATI_INTEGRATION_TOKEN:
+        raise HTTPException(503, "SIMPATI_API_URL dan SIMPATI_INTEGRATION_TOKEN wajib dikonfigurasi agar perubahan password tersimpan pada sumber utama SIMPATI 555.")
+    payload={"simpati_admin_id":str(account["id"]),"password":password_baru}
+    req=urllib.request.Request(SIMPATI_API_URL+"/api/integrasi/survei/admin-survei/password",
+        data=json.dumps(payload).encode(),headers={"Content-Type":"application/json","X-SIMPATI-Token":SIMPATI_INTEGRATION_TOKEN},method="POST")
+    try:
+        with urllib.request.urlopen(req,timeout=20) as response:
+            if response.status < 200 or response.status >= 300: raise RuntimeError("Respons SIMPATI tidak berhasil.")
+    except Exception as exc:
+        raise HTTPException(502,"Gagal memperbarui password pada SIMPATI 555: "+str(exc)[:250])
+    salt=secrets.token_hex(16); token=secrets.token_urlsafe(48)
+    with get_db() as connection:
+        connection.execute("UPDATE survey_admin_accounts SET password_salt=%s,password_hash=%s,updated_at=NOW() WHERE id=%s",
+            (salt,_password_hash(password_baru,salt),account["id"]))
+        connection.execute("DELETE FROM survey_admin_sessions WHERE admin_id=%s",(account["id"],))
+        connection.execute("INSERT INTO survey_admin_sessions(admin_id,token_hash,expires_at) VALUES(%s,%s,%s)",
+            (account["id"],_token_hash(token),datetime.now(timezone.utc)+timedelta(hours=12)))
+    response=RedirectResponse("/admin/dashboard",status_code=303)
+    response.set_cookie("survey_admin_session",token,max_age=43200,httponly=True,secure=True,samesite="lax",path="/")
+    return response
+
+
+@app.post("/admin-survei/logout")
+def survey_admin_logout(survey_admin_session: str | None = Cookie(default=None)):
+    if survey_admin_session:
+        with get_db() as connection:
+            connection.execute("DELETE FROM survey_admin_sessions WHERE token_hash=%s",(_token_hash(survey_admin_session),))
+    response=RedirectResponse("/admin-survei/login",status_code=303)
+    response.delete_cookie("survey_admin_session",path="/")
+    return response
+
+
+def _survey_admin_scope_sql(account, alias="s"):
+    role=account["role"]
+    clauses=["(o.member_id="+alias+".member_id OR o.login_id="+alias+".member_id)"]
+    params=[]
+    fields=[("scope_province","scope_province"),("scope_regency","scope_regency"),("scope_district","scope_district"),("scope_village_name","scope_village")]
+    depth={"DPD":1,"DPC":2,"DPS":3,"DPSS":4}[role]
+    for col,key in fields[:depth]:
+        clauses.append("COALESCE(o."+col+",'')=%s"); params.append(account[key])
+    return " AND ".join(clauses),tuple(params)
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+def admin_main_dashboard(request: Request, account=Depends(require_survey_admin)):
+    scope_sql, scope_params = _survey_admin_scope_sql(account, "s")
+    with get_db() as connection:
+        stats=connection.execute(f"""SELECT COUNT(*) AS surveys_total,
+            COUNT(*) FILTER (WHERE v.survey_id IS NOT NULL) AS verified_total,
+            COUNT(*) FILTER (WHERE v.survey_id IS NULL) AS pending_total,
+            COUNT(*) FILTER (WHERE s.latitude IS NOT NULL AND s.longitude IS NOT NULL) AS gps_total
+            FROM surveys s JOIN officers o ON (o.member_id=s.member_id OR o.login_id=s.member_id)
+            LEFT JOIN survey_verifications v ON v.survey_id=s.id WHERE {scope_sql}""",scope_params).fetchone()
+        recent=connection.execute(f"""SELECT s.id,s.applicant_name,s.business_name,s.village,s.surveyed_at,
+            COALESCE(o.member_name,o.login_id,o.member_id) AS officer_name
+            FROM surveys s JOIN officers o ON (o.member_id=s.member_id OR o.login_id=s.member_id)
+            WHERE {scope_sql} ORDER BY s.id DESC LIMIT 8""",scope_params).fetchall()
+    def wilayah_label(value, prefix):
+        value=(value or "").strip()
+        if not value: return ""
+        if value.casefold().startswith(("kabupaten ", "kota ", "provinsi ", "kecamatan ", "desa ", "kelurahan ")):
+            return value
+        return prefix + value
+    region_parts={
+        "DPD":[wilayah_label(account["scope_province"],"Provinsi ")],
+        "DPC":[wilayah_label(account["scope_regency"],"Kabupaten "),account["scope_province"]],
+        "DPS":[wilayah_label(account["scope_district"],"Kecamatan "),wilayah_label(account["scope_regency"],"Kabupaten "),account["scope_province"]],
+        "DPSS":[wilayah_label(account["scope_village"],"Desa "),wilayah_label(account["scope_district"],"Kecamatan "),wilayah_label(account["scope_regency"],"Kabupaten "),account["scope_province"]],
+    }[account["role"]]
+    region=", ".join(x for x in region_parts if x)
+    title=f"Admin Survei {account['role']} {region}"
+    stat=lambda k:int((stats or {}).get(k) or 0)
+    rows="".join(f"<tr><td>{escape(str(r.get('applicant_name') or '-'))}</td><td>{escape(str(r.get('business_name') or '-'))}</td><td>{escape(str(r.get('village') or '-'))}</td><td>{escape(str(r.get('officer_name') or '-'))}</td><td>{escape(str(r.get('surveyed_at') or '-'))}</td></tr>" for r in recent)
+    content=f"""<section class='panel'><h2 style='margin-top:0;color:#5b1018'>{escape(title)}</h2><p class='muted'>Cakupan akses: {escape(region)}. Data yang ditampilkan dibatasi otomatis berdasarkan wilayah akun SIMPATI 555.</p><div class='stats'><div class='stat'><b>{stat('surveys_total')}</b><span>Total survei</span></div><div class='stat'><b>{stat('pending_total')}</b><span>Menunggu verifikasi DPS</span></div><div class='stat'><b>{stat('verified_total')}</b><span>Sudah diverifikasi</span></div><div class='stat'><b>{stat('gps_total')}</b><span>Memiliki titik GPS</span></div></div><div style='display:flex;gap:10px;flex-wrap:wrap;margin:18px 0'><a class='btn gold' href='/admin/peta-gps'>📍 Peta GPS Data Hasil Survei</a></div></section><section class='panel'><h2>Survei terbaru dalam wilayah</h2><div class='lead-report-tablewrap'><table class='lead-report-table'><thead><tr><th>Nama yang disurvei</th><th>Usaha</th><th>Desa</th><th>Petugas DPSS</th><th>Waktu</th></tr></thead><tbody>{rows or '<tr><td colspan="5">Belum ada data survei pada cakupan wilayah ini.</td></tr>'}</tbody></table></div></section><section class='panel'><h2>Keamanan akun</h2><form method='post' action='/admin-survei/password'><label>Password saat ini</label><input type='password' name='password_lama' required autocomplete='current-password'><label>Password baru (minimal 12 karakter)</label><input type='password' name='password_baru' required minlength='12' autocomplete='new-password'><label>Konfirmasi password baru</label><input type='password' name='konfirmasi_password' required minlength='12' autocomplete='new-password'><button type='submit'>Ganti Password</button></form><form method='post' action='/admin-survei/logout' style='margin-top:12px'><button type='submit'>Keluar</button></form></section>"""
+    return HTMLResponse(_lead_page(title,account["username"],content))
+
+
+@app.get("/admin/peta-gps", response_class=HTMLResponse)
+def admin_survey_gps_map(request: Request, account=Depends(require_survey_admin)):
+    filters=_lead_filters(request)
+    scope_sql,scope_params=_survey_admin_scope_sql(account,"s")
+    clauses=[scope_sql]; params=list(scope_params)
+    if filters.get("tanggal_mulai"):
+        clauses.append("NULLIF(s.surveyed_at,'')::timestamptz::date >= %s::date"); params.append(filters["tanggal_mulai"])
+    if filters.get("tanggal_selesai"):
+        clauses.append("NULLIF(s.surveyed_at,'')::timestamptz::date <= %s::date"); params.append(filters["tanggal_selesai"])
+    if filters.get("wilayah"):
+        clauses.append("COALESCE(s.village,'') ILIKE %s"); params.append("%"+filters["wilayah"]+"%")
+    if filters.get("petugas"):
+        clauses.append("(COALESCE(o.member_id,'') ILIKE %s OR COALESCE(o.login_id,'') ILIKE %s OR COALESCE(o.member_name,'') ILIKE %s)"); params.extend(["%"+filters["petugas"]+"%"]*3)
+    with get_db() as connection:
+        rows=connection.execute(f"""SELECT s.id AS survey_id,s.member_id,COALESCE(o.member_name,o.login_id,o.member_id) AS officer_name,
+            s.surveyed_at,s.village,s.applicant_name,s.applicant_address,s.business_name,s.latitude,s.longitude,s.accuracy
+            FROM surveys s JOIN officers o ON (o.member_id=s.member_id OR o.login_id=s.member_id)
+            WHERE {' AND '.join(clauses)} ORDER BY s.id DESC""",tuple(params)).fetchall()
+    markers=[]; villages=set()
+    for r in rows:
+        if r.get("village"): villages.add(str(r["village"]))
+        try: lat,lon=float(r["latitude"]),float(r["longitude"])
+        except (TypeError,ValueError): continue
+        if not (-90<=lat<=90 and -180<=lon<=180): continue
+        markers.append({"lat":lat,"lon":lon,"survey_id":r["survey_id"],"applicant":r.get("applicant_name") or "-",
+            "business":r.get("business_name") or "-","address":r.get("applicant_address") or "-","village":r.get("village") or "-",
+            "officer":r.get("officer_name") or "-","date":r.get("surveyed_at") or "-","accuracy":r.get("accuracy")})
+    data=json.dumps(markers,ensure_ascii=False,default=str).replace("</","<\\/")
+    opts="".join(f"<option value='{_lead_e(v)}' {'selected' if filters.get('wilayah')==v else ''}>{_lead_e(v)}</option>" for v in sorted(villages,key=str.casefold))
+    region=", ".join(x for x in [account["scope_village"],account["scope_district"],account["scope_regency"],account["scope_province"]] if x)
+    content=f"""<section class='panel'><h2 style='color:#5b1018'>Peta GPS Data Hasil Survei</h2><p class='muted'>Wilayah akses: {escape(region)}. Setiap titik menampilkan nama orang yang disurvei, informasi usaha, alamat, petugas DPSS, waktu, dan akurasi GPS.</p><form method='get' action='/admin/peta-gps' class='filters'><div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{_lead_e(filters.get('tanggal_mulai'))}'></div><div><label>TANGGAL SELESAI</label><input type='date' name='tanggal_selesai' value='{_lead_e(filters.get('tanggal_selesai'))}'></div><div><label>DESA</label><select name='wilayah'><option value=''>Semua desa dalam cakupan</option>{opts}</select></div><div><label>PETUGAS DPSS</label><input name='petugas' value='{_lead_e(filters.get('petugas'))}' placeholder='ID atau nama petugas'></div><div class='actions' style='grid-column:1/-1'><button type='submit'>Terapkan Filter</button><a class='btn light' href='/admin/peta-gps'>Reset</a><a class='btn light' href='/admin/dashboard'>Dashboard</a></div></form><p><b>{len(markers)} titik GPS survei</b></p><div id='admin-gps-map' style='height:560px;min-height:360px;border-radius:12px'></div><p id='admin-map-status' class='muted'>Memuat peta…</p></section><script type='application/json' id='admin-map-data'>{data}</script><link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'><script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script><script>(function(){{const el=document.getElementById('admin-gps-map'),st=document.getElementById('admin-map-status'),data=JSON.parse(document.getElementById('admin-map-data').textContent||'[]');if(!window.L){{st.textContent='Peta gagal dimuat. Periksa koneksi internet.';return}}const map=L.map(el).setView([0.5,101.4],8);L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);const safe=v=>String(v??'-').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));const bounds=[];data.forEach(x=>{{const m=L.circleMarker([x.lat,x.lon],{{radius:8,color:'#8f1825',fillColor:'#d94a55',fillOpacity:.9,weight:2}}).addTo(map);m.bindPopup(`<b>DATA SURVEI #${{safe(x.survey_id)}}</b><br>Nama yang disurvei: <b>${{safe(x.applicant)}}</b><br>Usaha: ${{safe(x.business)}}<br>Alamat: ${{safe(x.address)}}<br>Desa: ${{safe(x.village)}}<br>Petugas DPSS: ${{safe(x.officer)}}<br>Waktu survei: ${{safe(x.date)}}<br>Koordinat: ${{x.lat.toFixed(6)}}, ${{x.lon.toFixed(6)}}<br>Akurasi GPS: ${{safe(x.accuracy)}} m`);bounds.push([x.lat,x.lon])}});if(bounds.length){{map.fitBounds(bounds,{{padding:[30,30],maxZoom:15}});st.textContent=`${{data.length}} titik GPS ditampilkan.`}}else st.textContent='Belum ada titik GPS pada filter dan cakupan ini.';setTimeout(()=>map.invalidateSize(),150)}})();</script>"""
+    return HTMLResponse(_lead_page("Peta GPS Hasil Survei",account["username"],content))
 
 
 @app.get("/admin", response_class=HTMLResponse)
