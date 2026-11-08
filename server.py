@@ -610,6 +610,9 @@ def initialize_database():
         # bertahap agar pemetaan desa baru tidak hanya bergantung pada nama desa.
         connection.execute("ALTER TABLE villages ADD COLUMN IF NOT EXISTS province_name VARCHAR(150) NOT NULL DEFAULT ''")
         connection.execute("ALTER TABLE villages ADD COLUMN IF NOT EXISTS regency_name VARCHAR(150) NOT NULL DEFAULT ''")
+        # Beberapa desa dapat memakai satu bucket privat bersama. Bucket bukan identitas desa;
+        # identitas desa ditentukan oleh hierarki wilayah dan object_path survei.
+        connection.execute("ALTER TABLE villages DROP CONSTRAINT IF EXISTS villages_bucket_name_key")
         # Nama desa boleh sama di wilayah berbeda. Identitas unik mengikuti hierarki wilayah,
         # sedangkan bucket_name tetap unik secara global untuk penyimpanan media.
         connection.execute("ALTER TABLE villages DROP CONSTRAINT IF EXISTS villages_village_name_key")
@@ -3551,13 +3554,17 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
     if level == "DPSS" and not (province and regency and district and village_name):
         raise HTTPException(status_code=422, detail="Wilayah DPSS belum lengkap pada SIMPATI 555.")
 
-    # village_id hanya dipakai sebagai referensi operasional survei, bukan sumber otorisasi.
+    # villages adalah proyeksi operasional lokal, bukan sumber otorisasi.
+    # Jika desa belum ada, buat referensi minimum dari data wilayah yang telah disahkan SIMPATI.
+    # Media desa baru memakai bucket privat bersama agar tidak memerlukan pembuatan bucket manual.
     assigned_village = None
     if level == "DPSS":
+        scope_key = "|".join(x.casefold().strip() for x in (province, regency, district, village_name))
         with get_db() as connection:
-            matches = connection.execute("""SELECT id,village_name,province_name,regency_name,district
-                FROM villages WHERE active=1
-                AND lower(trim(regexp_replace(village_name, '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+            connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("SIMPATI-VILLAGE:" + scope_key,))
+            matches = connection.execute("""SELECT id,village_name,province_name,regency_name,district,active
+                FROM villages
+                WHERE lower(trim(regexp_replace(village_name, '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
                     lower(trim(regexp_replace(%s, '^(desa|kelurahan)[[:space:]]+', '', 'i')))
                 AND lower(trim(regexp_replace(district, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
                     lower(trim(regexp_replace(%s, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
@@ -3566,9 +3573,33 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
                 AND lower(trim(regexp_replace(regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
                     lower(trim(regexp_replace(%s, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
                 ORDER BY id""", (village_name, district, province, regency)).fetchall()
-            if len(matches) != 1:
-                raise HTTPException(status_code=409, detail="Referensi desa untuk operasi survei tidak ditemukan secara unik. Perbarui master referensi desa Survei UMKM.")
-            assigned_village = matches[0]
+            if len(matches) > 1:
+                raise HTTPException(status_code=409, detail="Referensi desa lokal memiliki lebih dari satu kecocokan. Periksa duplikasi master wilayah Survei UMKM.")
+            if len(matches) == 1:
+                if int(matches[0].get("active") or 0) != 1:
+                    raise HTTPException(status_code=409, detail="Referensi desa ditemukan tetapi berstatus nonaktif. Aktifkan atau koreksi master wilayah Survei UMKM.")
+                assigned_village = matches[0]
+            else:
+                shared_bucket = (os.environ.get("SUPABASE_DEFAULT_BUCKET") or "survey-media").strip()
+                if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", shared_bucket):
+                    raise HTTPException(status_code=503, detail="SUPABASE_DEFAULT_BUCKET tidak valid untuk referensi desa operasional.")
+                assigned_village = connection.execute("""INSERT INTO villages
+                    (village_name,province_name,regency_name,district,bucket_name,active)
+                    VALUES(%s,%s,%s,%s,%s,1)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id,village_name,province_name,regency_name,district,active""",
+                    (village_name, province, regency, district, shared_bucket)).fetchone()
+                if assigned_village is None:
+                    # Tangani kemungkinan data dibuat proses lain yang tidak memakai advisory lock.
+                    matches = connection.execute("""SELECT id,village_name,province_name,regency_name,district,active
+                        FROM villages WHERE lower(trim(village_name))=lower(trim(%s))
+                        AND lower(trim(province_name))=lower(trim(%s))
+                        AND lower(trim(regency_name))=lower(trim(%s))
+                        AND lower(trim(district))=lower(trim(%s)) ORDER BY id""",
+                        (village_name, province, regency, district)).fetchall()
+                    if len(matches) != 1 or int(matches[0].get("active") or 0) != 1:
+                        raise HTTPException(status_code=409, detail="Referensi desa operasional gagal dibuat secara unik. Periksa master wilayah Survei UMKM.")
+                    assigned_village = matches[0]
 
     region = payload.region.strip() or {"DPS": district, "DPSS": village_name}[level]
     scope_village = assigned_village["village_name"] if assigned_village else ""
