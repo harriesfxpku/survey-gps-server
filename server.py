@@ -45,6 +45,9 @@ elif DATABASE_URL.startswith("postgresql+psycopg://"):
     DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgresql+psycopg://"):]
 
 API_TOKEN = os.environ.get("API_TOKEN", "")
+SIMPATI_INTEGRATION_TOKEN = os.environ.get("SIMPATI_INTEGRATION_TOKEN", "").strip()
+
+simpati_api_key_header = APIKeyHeader(name="X-SIMPATI-Token", auto_error=False)
 
 api_key_header = APIKeyHeader(
     name="X-API-Key",
@@ -654,6 +657,22 @@ def initialize_database():
         }
         for column_name, column_type in officer_scope_columns.items():
             connection.execute(f"ALTER TABLE officers ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
+        # Integrasi SIMPATI 555: tautan memakai UUID anggota SIMPATI, bukan NIK.
+        # Kolom baru bersifat aditif dan tidak mengubah akun petugas lama.
+        connection.execute("ALTER TABLE officers ADD COLUMN IF NOT EXISTS simpati_member_id VARCHAR(36)")
+        connection.execute("ALTER TABLE officers ADD COLUMN IF NOT EXISTS org_position VARCHAR(150) NOT NULL DEFAULT ''")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_officers_simpati_member_id ON officers(simpati_member_id) WHERE simpati_member_id IS NOT NULL AND simpati_member_id <> ''")
+        connection.execute("""CREATE TABLE IF NOT EXISTS simpati_integration_logs (
+            id BIGSERIAL PRIMARY KEY,
+            simpati_member_id VARCHAR(36) NOT NULL,
+            member_id VARCHAR(50) NOT NULL DEFAULT '',
+            action VARCHAR(30) NOT NULL,
+            result VARCHAR(20) NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            actor VARCHAR(150) NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_simpati_integration_logs_member ON simpati_integration_logs(simpati_member_id, created_at DESC)")
         # Ganti CHECK lama secara terarah tanpa mengasumsikan nama constraint bawaan PostgreSQL.
         connection.execute("""DO $$ DECLARE c RECORD; BEGIN
             FOR c IN SELECT conname FROM pg_constraint
@@ -1154,11 +1173,11 @@ def create_officer(
     )
 
 @app.get("/admin/officers", include_in_schema=False)
-@app.get("/admin/akun-petugas", tags=["Pengelolaan Akun"], summary="Lihat daftar akun DPS dan DPSS")
+@app.get("/admin/akun-petugas", tags=["Pengelolaan Akun"], summary="Lihat daftar akun pengurus DPD, DPC, DPS, dan DPSS")
 def list_officers(_: bool = Depends(verify_api_key)):
     with get_db() as connection:
         rows = connection.execute(
-            """SELECT o.member_id, o.member_name, o.role, o.region, o.active,
+            """SELECT o.member_id, o.member_name, o.role, o.org_position, o.region, o.active,
                       o.created_at, o.updated_at,
                       ARRAY(SELECT v.village_name
                             FROM officer_villages ov
@@ -3443,6 +3462,162 @@ def verify_pimpinan_or_admin(
             return credentials.username
     raise HTTPException(status_code=401, detail="Username atau kata sandi admin/pimpinan salah atau belum dikonfigurasi.", headers={"WWW-Authenticate": "Basic"})
 
+
+
+class SimpatiMemberSync(BaseModel):
+    simpati_member_id: str = Field(min_length=36, max_length=36)
+    full_name: str = Field(min_length=2, max_length=150)
+    phone: str = Field(default="", max_length=30)
+    address: str = Field(default="", max_length=2000)
+    org_level: str = Field(min_length=3, max_length=4)
+    org_position: str = Field(default="", max_length=150)
+    province_name: str = Field(default="", max_length=150)
+    regency_name: str = Field(default="", max_length=150)
+    district_name: str = Field(default="", max_length=150)
+    village_name: str = Field(default="", max_length=150)
+    region: str = Field(default="", max_length=150)
+    password: str = Field(default="", max_length=200)
+    wilayah_terverifikasi: bool
+    status_kepengurusan: str = Field(min_length=1, max_length=30)
+    actor: str = Field(default="SIMPATI555", max_length=150)
+
+
+def verify_simpati_integration_token(token: str | None = Depends(simpati_api_key_header)):
+    if not SIMPATI_INTEGRATION_TOKEN:
+        raise HTTPException(status_code=503, detail="SIMPATI_INTEGRATION_TOKEN belum dikonfigurasi.")
+    if not token or not secrets.compare_digest(token, SIMPATI_INTEGRATION_TOKEN):
+        raise HTTPException(status_code=401, detail="Token integrasi SIMPATI tidak valid.")
+    return True
+
+
+@app.post("/api/integrasi/simpati/anggota", tags=["Integrasi SIMPATI"], summary="Sinkronisasi anggota SIMPATI menjadi akun petugas")
+def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_simpati_integration_token)):
+    external_id = payload.simpati_member_id.strip()
+    try:
+        uuid.UUID(external_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail="ID anggota SIMPATI harus berupa UUID yang valid.")
+    level = payload.org_level.strip().upper()
+    if level not in {"DPS", "DPSS"}:
+        raise HTTPException(status_code=422, detail="Tingkat kepengurusan tidak didukung.")
+    if not payload.wilayah_terverifikasi or payload.status_kepengurusan.strip().upper() != "DISAHKAN":
+        raise HTTPException(status_code=403, detail="Akses hanya dapat diberikan kepada anggota dengan wilayah terverifikasi dan SK DISAHKAN di SIMPATI 555.")
+
+    province = payload.province_name.strip()
+    regency = payload.regency_name.strip()
+    district = payload.district_name.strip()
+    village_name = payload.village_name.strip()
+    if level == "DPS" and not (province and regency and district):
+        raise HTTPException(status_code=422, detail="Wilayah provinsi, kabupaten/kota, dan kecamatan wajib diisi untuk DPS.")
+    if level == "DPSS" and not (province and regency and district and village_name):
+        raise HTTPException(status_code=422, detail="Wilayah lengkap sampai desa/kelurahan wajib diisi untuk DPSS.")
+
+    assigned_village = None
+    if level == "DPSS":
+        with get_db() as connection:
+            matches = connection.execute("""SELECT id,village_name,province_name,regency_name,district
+                FROM villages WHERE active=1
+                AND lower(trim(regexp_replace(village_name, '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(desa|kelurahan)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(district, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(province_name, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
+                ORDER BY id""", (village_name, district, province, regency)).fetchall()
+            if len(matches) != 1:
+                raise HTTPException(status_code=409, detail="Desa DPSS tidak ditemukan secara unik pada Master Data Desa Survei UMKM.")
+            assigned_village = matches[0]
+
+    # Cakupan diturunkan dari tingkat kepengurusan. Verifikasi cakupan lokal tetap
+    # mengikuti mekanisme Survei UMKM yang sudah berjalan.
+    region = payload.region.strip() or {"DPS": district, "DPSS": village_name}[level]
+    scope_village = assigned_village["village_name"] if assigned_village else ""
+    with get_db() as connection:
+        connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("SIMPATI:" + external_id,))
+        existing = connection.execute("SELECT id,member_id,active,role,region,scope_province,scope_regency,scope_district,scope_village_name,scope_verified FROM officers WHERE simpati_member_id=%s FOR UPDATE", (external_id,)).fetchone()
+        if existing:
+            member_id = existing["member_id"]
+            officer_id = existing["id"]
+            scope_changed = (existing.get("role") != level or (existing.get("region") or "") != region or any(
+                (existing.get(key) or "") != value for key, value in (
+                    ("scope_province", province), ("scope_regency", regency),
+                    ("scope_district", district), ("scope_village_name", scope_village))))
+            connection.execute("""UPDATE officers SET member_name=%s,role=%s,org_position=%s,region=%s,active=1,
+                scope_province=%s,scope_regency=%s,scope_district=%s,scope_village_name=%s,
+                scope_verified=CASE WHEN %s THEN 0 ELSE scope_verified END,
+                scope_verified_by=CASE WHEN %s THEN '' ELSE scope_verified_by END,
+                scope_verified_at=CASE WHEN %s THEN NULL ELSE scope_verified_at END,updated_at=NOW()
+                WHERE id=%s""", (payload.full_name.strip(), level, payload.org_position.strip(), region, province, regency, district, scope_village,
+                    scope_changed, scope_changed, scope_changed, officer_id))
+            connection.execute("""INSERT INTO members(member_id,member_name,active,created_at)
+                VALUES(%s,%s,1,%s) ON CONFLICT(member_id) DO UPDATE SET
+                member_name=EXCLUDED.member_name,active=1""",
+                (member_id, payload.full_name.strip(), datetime.now(timezone.utc).isoformat()))
+            connection.execute("""INSERT INTO officer_profiles (officer_id,phone,address,updated_at)
+                VALUES (%s,%s,%s,NOW()) ON CONFLICT (officer_id) DO UPDATE SET
+                phone=EXCLUDED.phone,address=EXCLUDED.address,updated_at=NOW()""",
+                (officer_id, payload.phone.strip(), payload.address.strip()))
+            if scope_changed:
+                connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer_id,))
+            if assigned_village:
+                connection.execute("DELETE FROM officer_villages WHERE officer_id=%s", (officer_id,))
+                connection.execute("INSERT INTO officer_villages(officer_id,village_id) VALUES(%s,%s) ON CONFLICT DO NOTHING", (officer_id, assigned_village["id"]))
+            if scope_changed or int(existing.get("active") or 0) != 1:
+                connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer_id,))
+            action = "SYNC_AND_REACTIVATE" if int(existing.get("active") or 0) != 1 else "SYNC_PROFILE"
+        else:
+            if len(payload.password) < 10:
+                raise HTTPException(status_code=422, detail="Password awal akun baru minimal 10 karakter.")
+            member_id = _allocate_member_code(connection, level, region, village_name)
+            salt = secrets.token_hex(16)
+            hashed = _password_hash(payload.password, salt)
+            member = connection.execute("""INSERT INTO members(member_id,member_name,active,created_at)
+                VALUES(%s,%s,1,%s) RETURNING member_id""", (member_id, payload.full_name.strip(), datetime.now(timezone.utc).isoformat())).fetchone()
+            officer = connection.execute("""INSERT INTO officers
+                (member_id,member_name,password_salt,password_hash,role,org_position,region,active,
+                 scope_province,scope_regency,scope_district,scope_village_name,scope_verified,simpati_member_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,0,%s) RETURNING id""",
+                (member_id, payload.full_name.strip(), salt, hashed, level, payload.org_position.strip(), region, province, regency, district, scope_village, external_id)).fetchone()
+            officer_id = officer["id"]
+            connection.execute("""INSERT INTO officer_profiles(officer_id,phone,address)
+                VALUES(%s,%s,%s) ON CONFLICT(officer_id) DO UPDATE SET
+                phone=EXCLUDED.phone,address=EXCLUDED.address,updated_at=NOW()""",
+                (officer_id, payload.phone.strip(), payload.address.strip()))
+            if assigned_village:
+                connection.execute("INSERT INTO officer_villages(officer_id,village_id) VALUES(%s,%s) ON CONFLICT DO NOTHING", (officer_id, assigned_village["id"]))
+            action = "GRANT_ACCESS"
+        connection.execute("""INSERT INTO simpati_integration_logs
+            (simpati_member_id,member_id,action,result,detail,actor)
+            VALUES(%s,%s,%s,'success',%s,%s)""",
+            (external_id, member_id, action, f"role={level}; region={region}", payload.actor.strip() or "SIMPATI555"))
+
+    return {"message": "Akses Survei UMKM berhasil disinkronkan.", "simpati_member_id": external_id,
+            "member_id": member_id, "role": level, "region": region,
+            "village_assignment": scope_village or None,
+            "scope_status": "menunggu verifikasi cakupan di Survei UMKM"}
+
+
+class SimpatiMemberRevoke(BaseModel):
+    actor: str = Field(default="SIMPATI555", max_length=150)
+    reason: str = Field(default="Akses dicabut melalui SIMPATI 555", max_length=500)
+
+
+@app.post("/api/integrasi/simpati/anggota/{simpati_member_id}/nonaktifkan", tags=["Integrasi SIMPATI"], summary="Nonaktifkan akun petugas dari SIMPATI")
+def revoke_simpati_member_access(simpati_member_id: str, payload: SimpatiMemberRevoke, _: bool = Depends(verify_simpati_integration_token)):
+    with get_db() as connection:
+        officer = connection.execute("SELECT id,member_id,active,scope_province,scope_regency,scope_district,scope_village_name,scope_verified FROM officers WHERE simpati_member_id=%s FOR UPDATE", (simpati_member_id,)).fetchone()
+        if not officer:
+            raise HTTPException(status_code=404, detail="Tautan anggota SIMPATI tidak ditemukan.")
+        connection.execute("UPDATE officers SET active=0,updated_at=NOW() WHERE id=%s", (officer["id"],))
+        connection.execute("UPDATE members SET active=0 WHERE member_id=%s", (officer["member_id"],))
+        connection.execute("DELETE FROM officer_sessions WHERE officer_id=%s", (officer["id"],))
+        connection.execute("""INSERT INTO simpati_integration_logs
+            (simpati_member_id,member_id,action,result,detail,actor)
+            VALUES(%s,%s,'REVOKE_ACCESS','success',%s,%s)""",
+            (simpati_member_id, officer["member_id"], payload.reason, payload.actor.strip() or "SIMPATI555"))
+    return {"message": "Akses Survei UMKM dinonaktifkan. Riwayat survei tetap dipertahankan.", "member_id": officer["member_id"], "active": False}
 
 
 class OfficerAccessGrant(BaseModel):
