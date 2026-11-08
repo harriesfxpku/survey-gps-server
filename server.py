@@ -78,7 +78,7 @@ app.add_middleware(
 # yang hanya dapat disinkronkan oleh API integrasi SIMPATI.
 _LEGACY_ORGANIZATION_PATHS = (
     "/admin/officers", "/admin/akun-petugas", "/admin/members",
-    "/admin/villages", "/admin/master-data-wilayah", "/admin/cakupan-wilayah", "/admin/kelola-akun",
+    "/admin/cakupan-wilayah", "/admin/kelola-akun",
     "/admin/data-personel", "/admin/data-anggota",
     "/admin/pendaftaran-anggota", "/pendaftaran-anggota",
     "/dps/pendaftaran-anggota", "/dps/dashboard/pendaftaran-anggota",
@@ -363,8 +363,8 @@ def _member_code_prefix(org_level: str, region: str, village_name: str = "") -> 
     level = str(org_level).upper()
     if level == "DPSS":
         village_code = _member_short_code(village_name, {
-            "AUR SATI": "AST",
-            "BALAM JAYA": "BLJ",
+            "AUR SATI": "AS",
+            "BALAM JAYA": "BJ",
         })
         return f"DPSS{region_code}{village_code}"
     if level == "DPC":
@@ -690,6 +690,8 @@ def initialize_database():
         # Integrasi SIMPATI 555: tautan memakai UUID anggota SIMPATI, bukan NIK.
         # Kolom baru bersifat aditif dan tidak mengubah akun petugas lama.
         connection.execute("ALTER TABLE officers ADD COLUMN IF NOT EXISTS simpati_member_id VARCHAR(36)")
+        connection.execute("ALTER TABLE officers ADD COLUMN IF NOT EXISTS login_id VARCHAR(50)")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_officers_login_id ON officers(login_id) WHERE login_id IS NOT NULL AND login_id <> ''")
         connection.execute("ALTER TABLE officers ADD COLUMN IF NOT EXISTS org_position VARCHAR(150) NOT NULL DEFAULT ''")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_officers_simpati_member_id ON officers(simpati_member_id) WHERE simpati_member_id IS NOT NULL AND simpati_member_id <> ''")
         connection.execute("""CREATE TABLE IF NOT EXISTS simpati_integration_logs (
@@ -821,25 +823,49 @@ def get_village_bucket(connection, village_id):
 
 
 def ensure_dps_survey_access(connection, identity, survey_id):
-    """Batasi DPS berdasarkan wilayah sumber SIMPATI, bukan master desa lokal."""
-    if identity.get("role") == "SUPERUSER":
-        return
-    row = connection.execute("""
-        SELECT s.id
+    # Cakupan akun baru yang sudah memuat hierarki wilayah harus disahkan admin.
+    # Akun DPS lama tanpa kolom cakupan tetap memakai mekanisme kompatibilitas region.
+    officer_scope = connection.execute("""SELECT scope_province,scope_regency,scope_district,scope_verified
+        FROM officers WHERE member_id=%s AND active=1""", (identity["member_id"],)).fetchone()
+    if officer_scope:
+        has_declared_scope = any((officer_scope.get(k) or "").strip()
+            for k in ("scope_province", "scope_regency", "scope_district"))
+        if has_declared_scope and officer_scope.get("scope_verified") not in (1, True):
+            raise HTTPException(status_code=403,
+                detail="Cakupan wilayah DPS belum disahkan admin. Verifikasi cakupan wilayah sebelum melakukan verifikasi survei.")
+
+    # DPS hanya dapat membuka survei dari desa di kecamatan yang ditetapkan.
+    # Pengecekan provinsi/kabupaten ikut diterapkan jika master desa sudah memiliki
+    # data hierarki tersebut; master desa lama yang masih kosong tetap kompatibel.
+    row = connection.execute("""SELECT s.id
         FROM surveys s
-        JOIN officers creator ON creator.member_id=s.member_id AND creator.active=1 AND creator.role='DPSS'
-        JOIN officers reviewer ON reviewer.member_id=%s AND reviewer.active=1
-        WHERE s.id=%s AND reviewer.role='DPS'
-          AND creator.scope_verified=1 AND reviewer.scope_verified=1
-          AND lower(trim(regexp_replace(coalesce(creator.scope_province,''), '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
-              lower(trim(regexp_replace(coalesce(reviewer.scope_province,''), '^(provinsi|prov[.]?)[[:space:]]+', '', 'i')))
-          AND lower(trim(regexp_replace(coalesce(creator.scope_regency,''), '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
-              lower(trim(regexp_replace(coalesce(reviewer.scope_regency,''), '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
-          AND lower(trim(regexp_replace(coalesce(creator.scope_district,''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
-              lower(trim(regexp_replace(coalesce(reviewer.scope_district,''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
-    """, (identity["member_id"], survey_id)).fetchone()
+        JOIN officers o ON o.member_id = %s AND o.active = 1
+        WHERE s.id = %s
+          AND (
+            EXISTS (
+                SELECT 1 FROM officer_villages ov
+                WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
+            )
+            OR EXISTS (
+                SELECT 1 FROM villages v
+                WHERE v.active = 1
+                  AND lower(trim(regexp_replace(coalesce(v.district, ''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(regexp_replace(coalesce(NULLIF(o.scope_district,''), o.region, ''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'), '[,;].*$', '')))
+                  AND (coalesce(v.province_name,'')='' OR coalesce(o.scope_province,'')='' OR
+                      lower(trim(regexp_replace(v.province_name, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(o.scope_province, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))))
+                  AND (coalesce(v.regency_name,'')='' OR coalesce(o.scope_regency,'')='' OR
+                      lower(trim(regexp_replace(v.regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
+                      lower(trim(regexp_replace(o.scope_regency, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))))
+                  AND (
+                      v.id = s.village_id
+                      OR lower(trim(regexp_replace(coalesce(v.village_name, ''), '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+                         lower(trim(regexp_replace(coalesce(s.village, ''), '^(desa|kelurahan)[[:space:]]+', '', 'i')))
+                  )
+            )
+          )""", (identity["member_id"], survey_id)).fetchone()
     if row is None:
-        raise HTTPException(status_code=403, detail="Survei ini berada di luar wilayah kecamatan akun DPS menurut penugasan SIMPATI 555.")
+        raise HTTPException(status_code=403, detail="Survei ini berada di luar wilayah kecamatan akun DPS.")
 
 
 @app.on_event("startup")
@@ -977,7 +1003,7 @@ def get_request_identity(
             with get_db() as connection:
                 row = connection.execute(
                     """
-                    SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+                    SELECT o.id AS officer_id, o.member_id, o.login_id, o.member_name, o.role, o.region, o.active,
                            o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name,
                            o.scope_verified, s.expires_at
                     FROM officer_sessions s
@@ -990,6 +1016,7 @@ def get_request_identity(
                 return {
                     "auth_type": "officer",
                     "member_id": row["member_id"],
+                    "login_id": row.get("login_id") or row["member_id"],
                     "member_name": row["member_name"],
                     "role": row["role"],
                     "region": row["region"],
@@ -1041,7 +1068,7 @@ def get_officer_identity(
     with get_db() as connection:
         row = connection.execute(
             """
-            SELECT o.id AS officer_id, o.member_id, o.member_name, o.role, o.region, o.active,
+            SELECT o.id AS officer_id, o.member_id, o.login_id, o.member_name, o.role, o.region, o.active,
                    o.scope_province, o.scope_regency, o.scope_district, o.scope_village_name,
                    o.scope_verified, s.expires_at
             FROM officer_sessions s
@@ -1063,6 +1090,7 @@ def get_officer_identity(
     return {
         "auth_type": "officer",
         "member_id": row["member_id"],
+        "login_id": row.get("login_id") or row["member_id"],
         "member_name": row["member_name"],
         "role": row["role"],
         "region": row["region"],
@@ -1111,7 +1139,8 @@ def officer_login(payload: OfficerLogin, request: Request):
         }
     with get_db() as connection:
         officer = connection.execute(
-            "SELECT * FROM officers WHERE member_id = %s", (member_id,)
+            "SELECT * FROM officers WHERE login_id = %s OR member_id = %s ORDER BY CASE WHEN login_id = %s THEN 0 ELSE 1 END LIMIT 1",
+            (member_id, member_id, member_id)
         ).fetchone()
         if (
             not officer
@@ -1137,6 +1166,7 @@ def officer_login(payload: OfficerLogin, request: Request):
         "token_type": "Bearer",
         "expires_at": expires_at.isoformat(),
         "member_id": officer["member_id"],
+        "login_id": officer.get("login_id") or officer["member_id"],
         "member_name": officer["member_name"],
         "role": officer["role"],
         "region": officer["region"],
@@ -1151,7 +1181,7 @@ def officer_login(payload: OfficerLogin, request: Request):
 @app.get("/auth/me")
 def officer_me(identity: dict = Depends(get_officer_identity)):
     return {key: identity.get(key) for key in (
-        "member_id", "member_name", "role", "region", "scope_province",
+        "member_id", "login_id", "member_name", "role", "region", "scope_province",
         "scope_regency", "scope_district", "scope_village_name", "scope_verified"
     )}
 
@@ -1809,18 +1839,29 @@ def create_survey(
 
         survey_id = row["id"]
         village_name = survey.village.strip()
-        if identity["auth_type"] == "officer":
-            # DPSS hanya boleh menyimpan survei untuk desa yang ditetapkan SIMPATI.
-            # village_id sengaja nullable agar master desa lokal bukan syarat akses.
-            officer_scope = connection.execute("""SELECT role,scope_province,scope_regency,
-                scope_district,scope_village_name,scope_verified FROM officers
-                WHERE member_id=%s AND active=1""", (member_id,)).fetchone()
-            if not officer_scope or officer_scope.get("role") != "DPSS":
-                raise HTTPException(status_code=403, detail="Akun tidak memiliki kewenangan membuat survei awal.")
-            if officer_scope.get("scope_verified") not in (1, True):
-                raise HTTPException(status_code=403, detail="Penugasan wilayah belum disahkan oleh SIMPATI 555.")
-            if _normalize_region_name(village_name) != _normalize_region_name(officer_scope.get("scope_village_name")):
-                raise HTTPException(status_code=403, detail="Desa survei tidak sesuai dengan penugasan DPSS di SIMPATI 555.")
+        village_row = None
+        if village_name and identity["auth_type"] == "officer":
+            # Untuk DPSS, cocokkan nama desa di antara desa yang memang ditugaskan
+            # kepada akun ini. Ini menghindari salah pilih bila nama desa berulang.
+            assigned_rows = connection.execute("""SELECT v.id,v.village_name FROM villages v
+                JOIN officer_villages ov ON ov.village_id=v.id
+                JOIN officers o ON o.id=ov.officer_id
+                WHERE o.member_id=%s AND o.active=1 AND v.active=1
+                  AND LOWER(TRIM(v.village_name))=LOWER(%s)""", (member_id,village_name)).fetchall()
+            if len(assigned_rows) > 1:
+                raise HTTPException(status_code=409, detail="Ada lebih dari satu desa tugas dengan nama yang sama. Aplikasi perlu mengirim ID desa agar lokasi tidak tertukar.")
+            village_row = assigned_rows[0] if assigned_rows else None
+            if village_row is None:
+                raise HTTPException(status_code=403, detail="Desa tersebut belum terdaftar atau belum ditugaskan kepada akun DPSS ini.")
+            connection.execute("UPDATE surveys SET village_id=%s, village=%s WHERE id=%s", (village_row["id"], village_row["village_name"], survey_id))
+        elif village_name:
+            matching_rows = connection.execute("""SELECT id,village_name FROM villages
+                WHERE LOWER(TRIM(village_name))=LOWER(%s) AND active=1 ORDER BY id""", (village_name,)).fetchall()
+            if len(matching_rows) > 1:
+                raise HTTPException(status_code=409, detail="Nama desa ditemukan di beberapa wilayah. Data survei harus memilih desa berdasarkan ID wilayah.")
+            village_row = matching_rows[0] if matching_rows else None
+            if village_row:
+                connection.execute("UPDATE surveys SET village_id=%s, village=%s WHERE id=%s", (village_row["id"], village_row["village_name"], survey_id))
 
     return {
         "message": "Data survei berhasil disimpan",
@@ -1901,7 +1942,7 @@ def require_verified_dps_scope(identity: dict = Depends(require_dps)):
     # Akun DPS hanya boleh memeriksa data setelah cakupan resminya ditetapkan
     # oleh admin/pimpinan. Isian wilayah dari pendaftar tidak pernah memberi hak akses.
     if identity.get("scope_verified") not in (1, True):
-        raise HTTPException(status_code=403, detail="Penugasan wilayah akun DPS belum disahkan oleh SIMPATI 555.")
+        raise HTTPException(status_code=403, detail="Cakupan wilayah akun DPS belum diverifikasi oleh admin/pimpinan.")
     required_scope = (identity.get("scope_province"), identity.get("scope_regency"), identity.get("scope_district"))
     if not all(_normalize_region_name(v) for v in required_scope):
         raise HTTPException(status_code=403, detail="Cakupan Provinsi, Kabupaten/Kota, dan Kecamatan akun DPS belum lengkap.")
@@ -2022,7 +2063,7 @@ def _require_verified_monitor_scope(role: str, identity: dict):
     if identity.get("role") != role:
         raise HTTPException(status_code=403, detail=f"Fitur ini khusus akun {role}.")
     if identity.get("scope_verified") not in (1, True):
-        raise HTTPException(status_code=403, detail="Penugasan wilayah akun belum disahkan oleh SIMPATI 555.")
+        raise HTTPException(status_code=403, detail="Cakupan wilayah akun belum disahkan admin/pimpinan.")
     province = _normalize_region_name(identity.get("scope_province"))
     regency = _normalize_region_name(identity.get("scope_regency"))
     district = _normalize_region_name(identity.get("scope_district"))
@@ -2467,17 +2508,24 @@ def list_surveys_for_verification(
         # Penugasan desa manual yang sudah ada juga tetap dihormati.
         base_query = """SELECT DISTINCT s.*
             FROM surveys s
-            JOIN officers creator ON creator.member_id=s.member_id AND creator.active=1 AND creator.role='DPSS'
-            JOIN officers reviewer ON reviewer.member_id=%s AND reviewer.active=1
-            WHERE reviewer.role='DPS'
-              AND lower(trim(regexp_replace(coalesce(creator.scope_province,''), '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
-                  lower(trim(regexp_replace(coalesce(reviewer.scope_province,''), '^(provinsi|prov[.]?)[[:space:]]+', '', 'i')))
-              AND lower(trim(regexp_replace(coalesce(creator.scope_regency,''), '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
-                  lower(trim(regexp_replace(coalesce(reviewer.scope_regency,''), '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
-              AND lower(trim(regexp_replace(coalesce(creator.scope_district,''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
-                  lower(trim(regexp_replace(coalesce(reviewer.scope_district,''), '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
-              AND creator.scope_verified=1 AND reviewer.scope_verified=1
-        """
+            JOIN officers o ON o.member_id = %s AND o.active = 1
+            WHERE (
+                EXISTS (
+                    SELECT 1 FROM officer_villages ov
+                    WHERE ov.officer_id = o.id AND ov.village_id = s.village_id
+                )
+                OR EXISTS (
+                    SELECT 1 FROM villages v
+                    WHERE v.active = 1
+                      AND lower(trim(regexp_replace(coalesce(v.district, ''), '^(kecamatan|kec\\.?)[[:space:]]+', '', 'i'))) =
+                          lower(trim(regexp_replace(regexp_replace(coalesce(o.region, ''), '^(kecamatan|kec\\.?)[[:space:]]+', '', 'i'), '[,;].*$', '')))
+                      AND (
+                          v.id = s.village_id
+                          OR lower(trim(regexp_replace(coalesce(v.village_name, ''), '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+                             lower(trim(regexp_replace(coalesce(s.village, ''), '^(desa|kelurahan)[[:space:]]+', '', 'i')))
+                      )
+                )
+            )"""
         if not include_completed:
             base_query += " AND COALESCE(s.verification_status, '') NOT IN ('Sudah diverifikasi', 'Ditolak')"
         base_query += " ORDER BY s.id DESC"
@@ -3050,11 +3098,15 @@ def superuser_dashboard(
         # mengembalikan HTMLResponse baru sehingga header Set-Cookie terbuang.
         new_session_token = _issue_superuser_session(username)
     links = [
-        ("Dashboard Admin", "/admin/dashboard", "Pemantauan operasional survei"),
+        ("Dashboard Admin", "/admin/dashboard", "Administrasi sistem, anggota, akun, dan data wilayah"),
         ("Dashboard Pimpinan", "/pimpinan", "Laporan survei, verifikasi, personel, dan peta"),
         ("Dashboard DPD", "/superuser/open/dpd", "Monitoring tingkat provinsi"),
         ("Dashboard DPC", "/superuser/open/dpc", "Monitoring tingkat kabupaten/kota"),
-        ("Dashboard DPS", "/superuser/open/dps", "Verifikasi hasil survei tingkat kecamatan"),
+        ("Dashboard DPS", "/superuser/open/dps", "Pemeriksaan pendaftaran anggota tingkat kecamatan"),
+        ("Kelola Akses Aplikasi", "/admin/kelola-akun", "Pemberian dan pencabutan akses anggota terverifikasi"),
+        ("Cakupan Wilayah Petugas", "/admin/cakupan-wilayah", "Pengesahan cakupan akses petugas"),
+        ("Master Data Wilayah", "/admin/master-data-wilayah", "Pengelolaan referensi wilayah"),
+        ("Data Personel", "/admin/data-personel", "Data personel dan status akses"),
         ("Audit Aktivitas SUPERUSER", "/superuser/audit", "Riwayat akses dan aktivitas akun global"),
     ]
     cards = "".join(
@@ -3105,15 +3157,42 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
     with get_db() as connection:
         stats = connection.execute("""
             SELECT
+                (SELECT COUNT(*) FROM organization_member_registrations) AS registrations_total,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='pending') AS registrations_pending,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='revision') AS registrations_revision,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='approved') AS registrations_approved,
+                (SELECT COUNT(*) FROM organization_member_registrations WHERE status='rejected') AS registrations_rejected,
                 (SELECT COUNT(*) FROM officers) AS accounts_total,
                 (SELECT COUNT(*) FROM officers WHERE active=1) AS accounts_active,
                 (SELECT COUNT(*) FROM officers WHERE active<>1 OR active IS NULL) AS accounts_inactive,
                 (SELECT COUNT(*) FROM surveys) AS surveys_total,
                 (SELECT COUNT(*) FROM survey_verifications) AS verifications_total
         """).fetchone()
+        recent = connection.execute("""
+            SELECT full_name, registration_code, org_level, org_position, region, status, created_at
+            FROM organization_member_registrations
+            WHERE status IN ('pending','revision')
+            ORDER BY created_at DESC
+            LIMIT 6
+        """).fetchall()
 
     def stat(key):
         return int((stats or {}).get(key) or 0)
+
+    recent_rows = []
+    for row in recent:
+        status = str(row.get('status') or '')
+        status_label = 'Perlu perbaikan' if status == 'revision' else 'Menunggu verifikasi'
+        status_class = 'revision' if status == 'revision' else 'pending'
+        recent_rows.append(
+            "<tr>"
+            f"<td><b>{escape(str(row.get('full_name') or '-'))}</b><br><small>{escape(str(row.get('registration_code') or '-'))}</small></td>"
+            f"<td>{escape(str(row.get('org_level') or '-'))} · {escape(str(row.get('org_position') or '-'))}</td>"
+            f"<td>{escape(str(row.get('region') or '-'))}</td>"
+            f"<td><span class='badge {status_class}'>{status_label}</span></td>"
+            "</tr>"
+        )
+    recent_html = ''.join(recent_rows) or "<tr><td colspan='4' class='empty'>Tidak ada pendaftaran yang menunggu tindakan.</td></tr>"
 
     return HTMLResponse(f"""<!doctype html>
 <html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -3129,27 +3208,32 @@ def admin_main_dashboard(username: str = Depends(verify_admin)):
 .panel{{padding:17px;margin-top:15px;overflow:hidden}}.panel h2{{font-size:17px;color:#f1cb72;margin:0 0 12px}}.tablewrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:650px}}th,td{{text-align:left;padding:11px 9px;border-bottom:1px solid #493235;vertical-align:top}}th{{font-size:11px;text-transform:uppercase;color:#e7c46e;background:#301b20}}td{{color:#eee3d9}}small{{color:#b8a8a0}}.badge{{display:inline-block;border-radius:20px;padding:4px 9px;font-size:11px;font-weight:750}}.pending{{background:#604316;color:#ffdf8a}}.revision{{background:#62202a;color:#ffc0c6}}.empty{{text-align:center;color:#b8a8a0;padding:22px}}.foot{{margin-top:22px;text-align:center;color:#988780;font-size:12px}}
 @media(max-width:1200px){{.stats{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:800px){{.layout{{grid-template-columns:1fr;padding:14px}}.sidebar{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.sidebar .side-label{{display:none}}.sidebar a{{flex:0 0 auto}}}}@media(max-width:620px){{.hero{{padding:15px}}.brand img{{width:54px;height:54px}}.stats{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.stat{{padding:12px}}.stat strong{{font-size:23px}}.menu{{grid-template-columns:1fr}}.card{{padding:14px}}.layout{{padding:10px}}}}
 </style></head><body><main class='wrap'>
-<header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>555 · ADMIN CONTROL CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Pemantauan operasional Survei UMKM</p></div></div><div class='user'>Administrator: <b>{escape(username)}</b></div></header>
-<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
+<header class='hero'><div class='brand'><img src='/logo.png' alt='Logo 555'><div><h1>555 · ADMIN CONTROL CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Pusat administrasi organisasi</p></div></div><div class='user'>Administrator: <b>{escape(username)}</b></div></header>
+<div class='layout'><aside class='sidebar'><div class='side-label'>Menu Administrasi</div><a class='active' href='/admin/dashboard'>▦ &nbsp; Dashboard</a><a href='/admin/pendaftaran-anggota'>✎ &nbsp; Verifikasi Anggota</a><a href='/admin/data-anggota'>▤ &nbsp; Data Anggota</a><a href='/admin/data-personel'>♙ &nbsp; Rekap Anggota</a><a href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a><a href='/admin/cakupan-wilayah'>⌖ &nbsp; Cakupan Wilayah</a><a href='/admin/master-data-wilayah'>▦ &nbsp; Master Data Wilayah</a><a href='/admin'>⌖ &nbsp; Data Survei</a></aside><div class='main-content'>
 <h2 class='section-title'>Ringkasan Sistem</h2>
 <section class='stats'>
-<div class='stat'><span>Akun Operasional Tersinkron</span><strong>{stat('accounts_total')}</strong><small>Proyeksi akses dari SIMPATI 555</small></div>
+<div class='stat'><span>Total Pendaftaran Anggota</span><strong>{stat('registrations_total')}</strong><small>Seluruh status</small></div>
+<div class='stat'><span>Menunggu Verifikasi</span><strong>{stat('registrations_pending')}</strong><small>Perlu diperiksa admin</small></div>
+<div class='stat'><span>Perlu Perbaikan</span><strong>{stat('registrations_revision')}</strong><small>Menunggu pembaruan data</small></div>
+<div class='stat'><span>Anggota Disetujui</span><strong>{stat('registrations_approved')}</strong><small>Masuk daftar anggota terverifikasi</small></div>
+<div class='stat'><span>Pendaftaran Ditolak</span><strong>{stat('registrations_rejected')}</strong><small>Sudah diputuskan</small></div>
+<div class='stat'><span>Total Akun Aplikasi</span><strong>{stat('accounts_total')}</strong><small>Petugas yang pernah diberi akses</small></div>
 <div class='stat'><span>Akun Aktif</span><strong>{stat('accounts_active')}</strong><small>Dapat menggunakan aplikasi</small></div>
-<div class='stat'><span>Akun Nonaktif</span><strong>{stat('accounts_inactive')}</strong><small>Akses dicabut melalui SIMPATI 555</small></div>
+<div class='stat'><span>Akun Nonaktif</span><strong>{stat('accounts_inactive')}</strong><small>Akses sedang dicabut</small></div>
 <div class='stat'><span>Total Survei</span><strong>{stat('surveys_total')}</strong><small>Data survei tersimpan</small></div>
 <div class='stat'><span>Hasil Verifikasi DPS</span><strong>{stat('verifications_total')}</strong><small>Verifikasi tersimpan</small></div>
 </section>
 <h2 class='section-title'>Menu Administrasi</h2>
 <section class='menu'>
-
-
-
-
-
-
+<article class='card'><div class='icon'>📝</div><div><h3>Verifikasi Pendaftaran Anggota</h3><p>Periksa pendaftaran, edit data yang keliru, setujui, minta perbaikan, atau tolak pendaftaran.</p><a class='btn' href='/admin/pendaftaran-anggota'>Buka Verifikasi</a></div></article>
+<article class='card'><div class='icon'>🗂️</div><div><h3>Daftar Seluruh Anggota</h3><p>Lihat seluruh anggota DPS dan DPSS yang sudah disetujui, termasuk foto profil dan dokumen identitas.</p><a class='btn' href='/admin/data-anggota'>Buka Data Anggota</a></div></article>
+<article class='card'><div class='icon'>👥</div><div><h3>Data Personel Petugas</h3><p>Lihat dan kelola data profil petugas yang sudah memiliki akun aplikasi.</p><a class='btn' href='/admin/data-personel'>Buka Data Personel</a></div></article>
+<article class='card'><div class='icon'>🔐</div><div><h3>Kelola Akses Aplikasi</h3><p>Pilih anggota terverifikasi yang ditugaskan, berikan akses, aktifkan kembali, atau cabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses</a></div></article>
+<article class='card'><div class='icon'>🧭</div><div><h3>Penetapan Cakupan Wilayah</h3><p>Tetapkan wilayah resmi akun DPD, DPC, DPS, dan DPSS berdasarkan dokumen organisasi.</p><a class='btn' href='/admin/cakupan-wilayah'>Atur Cakupan Wilayah</a></div></article>
+<article class='card'><div class='icon'>🗺️</div><div><h3>Master Data Wilayah</h3><p>Kelola daftar resmi provinsi, kabupaten/kota, kecamatan, dan desa/kelurahan untuk pencocokan pendaftaran dan penugasan.</p><a class='btn' href='/admin/master-data-wilayah'>Kelola Data Wilayah</a></div></article>
 <article class='card'><div class='icon'>📍</div><div><h3>Data Survei dan Media</h3><p>Pantau data survei, lokasi GPS, dokumen, foto, video, dan hasil verifikasi yang tersimpan.</p><a class='btn' href='/admin'>Buka Data Survei</a></div></article>
 </section>
-
+<section class='panel'><h2>Pendaftaran yang Memerlukan Tindakan</h2><div class='tablewrap'><table><thead><tr><th>Nama / Kode</th><th>Struktur / Jabatan</th><th>Wilayah</th><th>Status</th></tr></thead><tbody>{recent_html}</tbody></table></div><p style='margin:14px 0 0'><a class='btn' href='/admin/pendaftaran-anggota?status=pending'>Periksa Pendaftaran</a></p></section>
 <div class='foot'>Dashboard Administrasi Triple 555 · Data ditampilkan langsung dari server</div>
 </div></div></main></body></html>""")
 
@@ -3361,7 +3445,7 @@ def admin_dashboard(
     <body>
         <h1>Dashboard Survei GPS</h1>
         <div class="info">Login admin berhasil. Data diperbarui otomatis setiap 60 detik. Pratinjau media menggunakan tautan sementara untuk bucket privat.</div>
-        <div class="info"><a href="/admin/dashboard">Dashboard Operasional Admin</a></div>
+        <div class="info"><a href="/admin/dashboard">Dashboard Utama Admin</a> &nbsp; | &nbsp; <a href="/admin/pendaftaran-anggota">Verifikasi Pendaftaran Anggota</a> &nbsp; | &nbsp; <a href="/admin/kelola-akun">Kelola Akses Aplikasi</a></div>
         <div class="card"><strong>Total data survei:</strong> {len(rows)} &nbsp; | &nbsp; <strong>Total file media:</strong> {len(media_rows) + len(verification_media_rows)} &nbsp; | &nbsp; <strong>Total hasil verifikasi:</strong> {len(verification_rows)}</div>
         <div class="table-wrap">
             <table>
@@ -3418,6 +3502,7 @@ def verify_pimpinan_or_admin(
 
 class SimpatiMemberSync(BaseModel):
     simpati_member_id: str = Field(min_length=36, max_length=36)
+    login_id: str = Field(min_length=5, max_length=50, pattern=r"^[A-Z0-9]+$")
     full_name: str = Field(min_length=2, max_length=150)
     phone: str = Field(default="", max_length=30)
     address: str = Field(default="", max_length=2000)
@@ -3466,13 +3551,27 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
     if level == "DPSS" and not (province and regency and district and village_name):
         raise HTTPException(status_code=422, detail="Wilayah DPSS belum lengkap pada SIMPATI 555.")
 
-    # SIMPATI menjadi sumber wilayah. Sinkronisasi akun tidak boleh bergantung
-    # pada master desa lokal Survei UMKM yang dapat kosong atau tidak lengkap.
-    # Nama desa resmi disimpan pada scope_village_name; village_id tetap opsional
-    # sebagai metadata operasional lama, bukan sebagai pemberi kewenangan.
+    # village_id hanya dipakai sebagai referensi operasional survei, bukan sumber otorisasi.
     assigned_village = None
+    if level == "DPSS":
+        with get_db() as connection:
+            matches = connection.execute("""SELECT id,village_name,province_name,regency_name,district
+                FROM villages WHERE active=1
+                AND lower(trim(regexp_replace(village_name, '^(desa|kelurahan)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(desa|kelurahan)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(district, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(kecamatan|kec[.]?)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(province_name, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(provinsi|prov[.]?)[[:space:]]+', '', 'i')))
+                AND lower(trim(regexp_replace(regency_name, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i'))) =
+                    lower(trim(regexp_replace(%s, '^(kabupaten|kab[.]?|kota)[[:space:]]+', '', 'i')))
+                ORDER BY id""", (village_name, district, province, regency)).fetchall()
+            if len(matches) != 1:
+                raise HTTPException(status_code=409, detail="Referensi desa untuk operasi survei tidak ditemukan secara unik. Perbarui master referensi desa Survei UMKM.")
+            assigned_village = matches[0]
+
     region = payload.region.strip() or {"DPS": district, "DPSS": village_name}[level]
-    scope_village = village_name if level == "DPSS" else ""
+    scope_village = assigned_village["village_name"] if assigned_village else ""
     with get_db() as connection:
         connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("SIMPATI:" + external_id,))
         existing = connection.execute("""SELECT id,member_id,active,role,region,scope_province,scope_regency,
@@ -3483,7 +3582,7 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
         if payload.password and len(payload.password) < 10:
             raise HTTPException(status_code=422, detail="Password dari SIMPATI minimal 10 karakter.")
 
-        # UUID SIMPATI dipakai langsung sebagai ID login. Tidak ada ID organisasi lokal.
+        # UUID SIMPATI tetap menjadi identitas internal; login memakai login_id dari SIMPATI.
         connection.execute("""INSERT INTO members(member_id,member_name,active,created_at)
             VALUES(%s,%s,1,%s) ON CONFLICT(member_id) DO UPDATE SET
             member_name=EXCLUDED.member_name,active=1""",
@@ -3498,7 +3597,7 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
                     ("scope_district", district), ("scope_village_name", scope_village))))
             password_sql = ""
             params = [external_id, payload.full_name.strip(), level, payload.org_position.strip(), region,
-                      province, regency, district, scope_village]
+                      province, regency, district, scope_village, payload.login_id.strip().upper()]
             if payload.password:
                 salt = secrets.token_hex(16)
                 password_sql = ",password_salt=%s,password_hash=%s"
@@ -3506,7 +3605,7 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
             params.extend([officer_id])
             connection.execute(f"""UPDATE officers SET member_id=%s,member_name=%s,role=%s,org_position=%s,
                 region=%s,active=1,scope_province=%s,scope_regency=%s,scope_district=%s,
-                scope_village_name=%s,scope_verified=1,scope_verified_by='SIMPATI 555',
+                scope_village_name=%s,login_id=%s,scope_verified=1,scope_verified_by='SIMPATI 555',
                 scope_verified_at=NOW(),updated_at=NOW() {password_sql} WHERE id=%s""", tuple(params))
             if old_member_id and old_member_id != external_id:
                 # Data uji coba lama tidak dipindahkan; hapus identitas lokal yatim setelah relasi akun dialihkan.
@@ -3526,11 +3625,11 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
             hashed = _password_hash(payload.password, salt)
             officer = connection.execute("""INSERT INTO officers
                 (member_id,member_name,password_salt,password_hash,role,org_position,region,active,
-                 scope_province,scope_regency,scope_district,scope_village_name,scope_verified,
+                 scope_province,scope_regency,scope_district,scope_village_name,login_id,scope_verified,
                  scope_verified_by,scope_verified_at,simpati_member_id)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,1,'SIMPATI 555',NOW(),%s) RETURNING id""",
+                VALUES(%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s,%s,1,'SIMPATI 555',NOW(),%s) RETURNING id""",
                 (external_id, payload.full_name.strip(), salt, hashed, level, payload.org_position.strip(),
-                 region, province, regency, district, scope_village, external_id)).fetchone()
+                 region, province, regency, district, scope_village, payload.login_id.strip().upper(), external_id)).fetchone()
             officer_id = officer["id"]
             connection.execute("INSERT INTO officer_profiles(officer_id,phone,address) VALUES(%s,%s,%s)",
                 (officer_id, payload.phone.strip(), payload.address.strip()))
@@ -3541,10 +3640,10 @@ def sync_simpati_member(payload: SimpatiMemberSync, _: bool = Depends(verify_sim
         connection.execute("""INSERT INTO simpati_integration_logs
             (simpati_member_id,member_id,action,result,detail,actor)
             VALUES(%s,%s,%s,'success',%s,%s)""",
-            (external_id, external_id, action, f"role={level}; region={region}; scope=approved_by_simpati", payload.actor.strip() or "SIMPATI555"))
+            (external_id, external_id, action, f"role={level}; login_id={payload.login_id.strip().upper()}; region={region}; scope=approved_by_simpati", payload.actor.strip() or "SIMPATI555"))
 
     return {"message": "Akses operasional Survei UMKM berhasil disinkronkan dari SIMPATI 555.",
-            "simpati_member_id": external_id, "member_id": external_id, "role": level,
+            "simpati_member_id": external_id, "member_id": external_id, "login_id": payload.login_id.strip().upper(), "role": level,
             "region": region, "village_assignment": scope_village or None,
             "scope_status": "disahkan_di_simpati", "authorization_source": "SIMPATI 555"}
 
@@ -3862,7 +3961,7 @@ main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
 .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#211518;border:1px solid #5b3939;border-left:4px solid var(--gold);border-radius:13px;padding:14px}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#302225}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:#b8a8a0;font-size:11px}}.person-info h3{{margin:0 0 3px;color:#f1cb72}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#174d32;color:#a7efbf}}.status.inactive{{background:#604316;color:#ffdf8a}}footer{{text-align:center;color:#988780;font-size:12px;padding:20px}}
 @media(max-width:900px){{.shell{{grid-template-columns:1fr;padding:14px}}.nav{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.nav:before{{display:none}}.nav a{{flex:0 0 auto}}}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}.shell{{padding:10px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
@@ -3981,7 +4080,7 @@ def admin_data_anggota(q: str = "", tingkat: str = "SEMUA", username: str = Depe
     cards_html=''.join(cards) or "<div class='empty'>Belum ada anggota terverifikasi yang sesuai dengan pencarian.</div>"
     html=f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Daftar Seluruh Anggota | Triple 555</title>
     <style>*{{box-sizing:border-box}}body{{margin:0;background:#f5f1eb;color:#292323;font:14px/1.5 system-ui,Arial,sans-serif}}header{{background:linear-gradient(120deg,#31090e,#5b1018);color:#fff;padding:22px;border-bottom:4px solid #d8b15a}}main{{max-width:1250px;margin:auto;padding:18px}}.nav,.filters,.doc-row{{display:flex;gap:9px;flex-wrap:wrap;align-items:center}}.nav{{margin-bottom:15px}}.btn,button{{display:inline-block;background:#5b1018;color:#fff;text-decoration:none;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}}.btn.light{{background:#eee8e1;color:#382e2e}}.panel{{background:#fff;padding:16px;border-radius:13px;margin-bottom:14px}}input,select{{padding:10px;border:1px solid #d6cec6;border-radius:8px;font:inherit}}.filters input{{flex:1;min-width:220px}}.count{{color:#6c625b;margin:10px 0}}.grid{{display:grid;gap:13px}}.member-card{{display:grid;grid-template-columns:145px 1fr;gap:17px;background:#fff;border:1px solid #e7ded4;border-radius:14px;padding:16px;box-shadow:0 3px 12px #32100b08}}.photo{{width:145px;height:170px;border-radius:10px;object-fit:cover;background:#f0ece7}}.no-photo{{display:grid;place-items:center;text-align:center;color:#777;padding:10px}}.topline{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}}h2{{margin:0 0 4px;color:#5b1018;font-size:19px}}.id{{font-weight:800;color:#775313}}.level{{background:#f5ead5;color:#5b1018;border-radius:20px;padding:5px 11px;font-weight:800}}.details{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}}.details div{{min-width:0}}.details b,.details span{{display:block}}.details b{{font-size:11px;color:#786e65;text-transform:uppercase}}.details span{{overflow-wrap:anywhere}}.details .wide{{grid-column:1/-1}}.doc-row{{border-top:1px solid #eee5dc;padding-top:12px}}.doc{{background:#8b641c}}.muted,.empty{{color:#766d65}}.empty{{background:#fff;padding:28px;text-align:center;border-radius:12px}}@media(max-width:700px){{main{{padding:11px}}.member-card{{grid-template-columns:90px 1fr;padding:11px;gap:11px}}.photo{{width:90px;height:115px}}.details{{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.topline{{flex-direction:column}}}}</style></head><body><header><h1 style='margin:0'>Daftar Seluruh Anggota DPS dan DPSS</h1><div>Data anggota terverifikasi · Administrasi Organisasi Triple 555</div></header><main>
-    <nav class='nav'><a class='btn light' href='/admin/dashboard'>Dashboard Utama Admin</a><a class='btn light' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran</a></nav>
+    <nav class='nav'><a class='btn light' href='/admin/dashboard'>Dashboard Utama Admin</a><a class='btn light' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a><a class='btn light' href='/admin/pendaftaran-anggota'>Verifikasi Pendaftaran</a></nav>
     <section class='panel'><form class='filters' method='get'><input name='q' value='{_lead_e(term)}' placeholder='Cari nama, ID Member, NIK, HP, jabatan, atau wilayah'><select name='tingkat'><option value='SEMUA' {'selected' if tingkat=='SEMUA' else ''}>Semua tingkat</option><option value='DPS' {'selected' if tingkat=='DPS' else ''}>DPS</option><option value='DPSS' {'selected' if tingkat=='DPSS' else ''}>DPSS</option></select><button type='submit'>Cari / Filter</button><a class='btn light' href='/admin/data-anggota'>Reset</a></form><p class='count'>Jumlah anggota terverifikasi: <b>{len(rows)}</b></p></section><section class='grid'>{cards_html}</section></main></body></html>"""
     return HTMLResponse(html)
 
@@ -4746,7 +4845,7 @@ def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan
     content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
 {_lead_map_embed(surveys, verifications)}
 <section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
-<section class='cards'><article class='report-card'><h2>👥 Data Anggota DPS dan DPSS</h2><p>Daftar anggota terverifikasi beserta identitas dan dokumen keanggotaannya. Pengaturan akses aplikasi dilakukan melalui menu Kelola Akses.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Anggota</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Identitas anggota bersumber dari pendaftaran mandiri yang telah diverifikasi. Pengaturan akun hanya untuk memberikan atau mencabut akses aplikasi.</p></article></section>
+<section class='cards'><article class='report-card'><h2>👥 Data Anggota DPS dan DPSS</h2><p>Daftar anggota terverifikasi beserta identitas dan dokumen keanggotaannya. Pengaturan akses aplikasi dilakukan melalui menu Kelola Akses.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Anggota</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Identitas anggota bersumber dari pendaftaran mandiri yang telah diverifikasi. Pengaturan akun hanya untuk memberikan atau mencabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a></article></section>
 <section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
     return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
 
