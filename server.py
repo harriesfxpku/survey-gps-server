@@ -50,6 +50,14 @@ SIMPATI_API_URL = os.environ.get("SIMPATI_API_URL", "").strip().rstrip("/")
 
 simpati_api_key_header = APIKeyHeader(name="X-SIMPATI-Token", auto_error=False)
 
+def verify_simpati_integration_token(token: str | None = Depends(simpati_api_key_header)):
+    if not SIMPATI_INTEGRATION_TOKEN:
+        raise HTTPException(status_code=503, detail="SIMPATI_INTEGRATION_TOKEN belum dikonfigurasi.")
+    if not token or not secrets.compare_digest(token, SIMPATI_INTEGRATION_TOKEN):
+        raise HTTPException(status_code=401, detail="Token integrasi SIMPATI tidak valid.")
+    return True
+
+
 api_key_header = APIKeyHeader(
     name="X-API-Key",
     auto_error=False,
@@ -3684,14 +3692,6 @@ class SimpatiMemberSync(BaseModel):
     wilayah_terverifikasi: bool
     status_kepengurusan: str = Field(min_length=1, max_length=30)
     actor: str = Field(default="SIMPATI555", max_length=150)
-
-
-def verify_simpati_integration_token(token: str | None = Depends(simpati_api_key_header)):
-    if not SIMPATI_INTEGRATION_TOKEN:
-        raise HTTPException(status_code=503, detail="SIMPATI_INTEGRATION_TOKEN belum dikonfigurasi.")
-    if not token or not secrets.compare_digest(token, SIMPATI_INTEGRATION_TOKEN):
-        raise HTTPException(status_code=401, detail="Token integrasi SIMPATI tidak valid.")
-    return True
 
 
 @app.post("/api/integrasi/simpati/anggota", tags=["Integrasi SIMPATI"], summary="Sinkronisasi akses operasional dari SIMPATI 555")
