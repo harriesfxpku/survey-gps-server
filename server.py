@@ -954,6 +954,17 @@ def _password_hash(password: str, salt_hex: str) -> str:
     ).hex()
 
 
+def _verify_password(password: str, salt_hex: str, expected_hash: str) -> bool:
+    """Verifikasi password dengan format PBKDF2 yang sama seperti _password_hash."""
+    if not isinstance(password, str) or not isinstance(salt_hex, str) or not isinstance(expected_hash, str):
+        return False
+    try:
+        actual_hash = _password_hash(password, salt_hex)
+    except (TypeError, ValueError):
+        return False
+    return secrets.compare_digest(actual_hash, expected_hash)
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
