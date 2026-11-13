@@ -108,6 +108,36 @@ async def block_legacy_organization_management(request: Request, call_next):
     return await call_next(request)
 
 
+# =========================================================
+# PENEGAKAN LISENSI SIMPATI (modul SURVEI_GPS)
+# =========================================================
+# Status lisensi diambil dari SIMPATI 555 (ditandatangani HMAC, anti-replay). Saat lisensi
+# habis / modul tidak berlisensi / tidak dapat diverifikasi, semua mutasi data (survei,
+# media, verifikasi, sinkronisasi) ditolak; login, baca data, dan penonaktifan akun tetap boleh.
+from simpati_license_gate import SimpatiLicenseGate, is_mutation_allowed_when_restricted
+from starlette.concurrency import run_in_threadpool as _run_in_threadpool
+
+_license_gate = SimpatiLicenseGate(SIMPATI_API_URL, SIMPATI_INTEGRATION_TOKEN)
+
+
+@app.middleware("http")
+async def simpati_license_enforcement(request: Request, call_next):
+    if not is_mutation_allowed_when_restricted(request.method, request.url.path):
+        restricted, reason = await _run_in_threadpool(_license_gate.evaluate)
+        if restricted:
+            return Response(
+                content=json.dumps({
+                    "detail": "Mode Terbatas: lisensi SIMPATI tidak aktif atau tidak dapat diverifikasi. "
+                              "Data tidak dapat diubah sampai lisensi diperpanjang. " + reason,
+                    "restricted_mode": True,
+                }),
+                status_code=403,
+                media_type="application/json",
+                headers={"Cache-Control": "no-store", "X-License-Status": "RESTRICTED"},
+            )
+    return await call_next(request)
+
+
 # Dependensi autentikasi admin harus didefinisikan sebelum route yang memakainya.
 admin_security = HTTPBasic()
 superuser_security = HTTPBasic(auto_error=False)
