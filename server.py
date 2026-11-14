@@ -3886,6 +3886,29 @@ def verify_pimpinan_or_admin(
 
 
 
+def verify_lead_or_survey_admin(
+    request: Request,
+    survey_admin_session: str | None = Cookie(default=None),
+    sidps_session: str | None = Cookie(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(superuser_security),
+):
+    """Akses laporan /pimpinan/*: sesi Admin Survei (data dibatasi wilayah akun) atau admin/pimpinan/SUPERUSER (nasional).
+
+    Mengembalikan (username, account). account=None berarti akses nasional (pimpinan/superuser).
+    Sesi Admin Survei diutamakan (hak akses paling sempit)."""
+    account = _survey_admin_identity(survey_admin_session)
+    if account:
+        return account["username"], account
+    try:
+        return verify_pimpinan_or_admin(request, sidps_session, credentials), None
+    except HTTPException as exc:
+        # Admin Survei yang sesinya berakhir diarahkan ke halaman login Admin Survei,
+        # bukan dimunculkan popup ID/password bawaan browser (HTTP Basic).
+        if exc.status_code == 401 and survey_admin_session:
+            raise HTTPException(303, headers={"Location": "/admin-survei/login?message=" + quote("Sesi Admin Survei berakhir. Silakan login kembali.")})
+        raise
+
+
 class SimpatiMemberSync(BaseModel):
     simpati_member_id: str = Field(min_length=36, max_length=36)
     login_id: str = Field(min_length=5, max_length=50, pattern=r"^[A-Z0-9]+$")
@@ -4259,8 +4282,12 @@ def _lead_filters(request):
     return {k: request.query_params.get(k, "").strip() for k in ("tanggal_mulai", "tanggal_selesai", "wilayah", "petugas")}
 
 
-def _lead_where(filters, alias="s"):
+def _lead_where(filters, alias="s", account=None):
     clauses, params = [], []
+    if account:  # Admin Survei: batasi data sesuai wilayah akun yang dibuat Superadmin SIMPATI 555
+        scope_sql, scope_params = _survey_admin_scope_sql(account, alias)
+        clauses.append(scope_sql)
+        params.extend(scope_params)
     if filters.get("tanggal_mulai"):
         clauses.append(f"NULLIF({alias}.surveyed_at, '')::timestamptz::date >= %s::date")
         params.append(filters["tanggal_mulai"])
@@ -4276,20 +4303,22 @@ def _lead_where(filters, alias="s"):
     return (" WHERE " + " AND ".join(clauses) if clauses else ""), tuple(params)
 
 
-def _lead_survey_rows(filters):
-    where_sql, params = _lead_where(filters, "s")
+def _lead_survey_rows(filters, account=None):
+    where_sql, params = _lead_where(filters, "s", account)
+    join_on = "(o.member_id=s.member_id OR o.login_id=s.member_id)" if account else "o.member_id=s.member_id"
     sql = """SELECT s.id AS survey_id, s.member_id, COALESCE(o.member_name,s.member_id) AS officer_name,
         s.surveyed_at, s.received_at, s.village, s.applicant_name, s.applicant_phone, s.applicant_address,
         s.business_name, s.business_type, s.business_location, s.capital_amount, s.turnover_amount,
         s.net_profit_amount, s.worker_count, s.assistance_types, s.assistance_amount, s.notes,
         s.latitude, s.longitude, s.accuracy
-        FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id""" + where_sql + " ORDER BY s.id DESC"
+        FROM surveys s LEFT JOIN officers o ON """ + join_on + where_sql + " ORDER BY s.id DESC"
     with get_db() as connection:
         return [dict(r) for r in connection.execute(sql, params).fetchall()]
 
 
-def _lead_verification_rows(filters):
-    where_sql, params = _lead_where(filters, "s")
+def _lead_verification_rows(filters, account=None):
+    where_sql, params = _lead_where(filters, "s", account)
+    join_on = "(o.member_id=s.member_id OR o.login_id=s.member_id)" if account else "o.member_id=s.member_id"
     sql = """SELECT s.id AS survey_id, s.member_id, COALESCE(o.member_name,s.member_id) AS officer_name,
         s.surveyed_at, s.village, s.applicant_name, s.business_name, s.business_type,
         v.decision, v.verifier_id, v.verifier_name, v.verifier_region, v.verified_at,
@@ -4298,7 +4327,7 @@ def _lead_verification_rows(filters):
         v.data_match, v.discrepancy_notes, v.verification_notes, v.rejection_reason,
         v.latitude AS verification_latitude, v.longitude AS verification_longitude, v.accuracy AS verification_accuracy,
         v.total_needs_amount
-        FROM surveys s LEFT JOIN officers o ON o.member_id=s.member_id
+        FROM surveys s LEFT JOIN officers o ON """ + join_on + """
         JOIN survey_verifications v ON v.survey_id=s.id""" + where_sql + " ORDER BY v.verified_at DESC NULLS LAST, s.id DESC"
     with get_db() as connection:
         return [dict(r) for r in connection.execute(sql, params).fetchall()]
@@ -4340,6 +4369,19 @@ def _lead_qs(filters):
 def _lead_page(title, username, content, survey_admin=False):
     # Halaman Admin Survei: tombol Keluar tetap (fixed) di kanan atas layar, selalu terlihat saat scroll.
     logout_html = SURVEY_ADMIN_LOGOUT_HTML if survey_admin else ""
+    if survey_admin:  # menu Admin Survei: tetap di dalam sesi akun, tanpa "Kelola Akses" (khusus Superadmin)
+        nav_html = ("<nav class='nav'><a class='btn light' href='/admin/dashboard'>▦ &nbsp; Dashboard</a>"
+                    "<a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a>"
+                    "<a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a>"
+                    "<a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a>"
+                    "<a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a></nav>")
+    else:
+        nav_html = ("<nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a>"
+                    "<a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a>"
+                    "<a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a>"
+                    "<a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a>"
+                    "<a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a>"
+                    "<a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav>")
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{_lead_e(title)} | Ikatan Persaudaraan Triple 555</title><style>
 :root{{--maroon:#650b18;--deep:#17070b;--gold:#e0ad35;--paper:#f4f0eb;--ink:#f7eee5;--line:#503337;--muted:#b8a8a0}}
@@ -4369,7 +4411,7 @@ main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
 .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#211518;border:1px solid #5b3939;border-left:4px solid var(--gold);border-radius:13px;padding:14px}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#302225}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:#b8a8a0;font-size:11px}}.person-info h3{{margin:0 0 3px;color:#f1cb72}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#174d32;color:#a7efbf}}.status.inactive{{background:#604316;color:#ffdf8a}}footer{{text-align:center;color:#988780;font-size:12px;padding:20px}}
 @media(max-width:900px){{.shell{{grid-template-columns:1fr;padding:14px}}.nav{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.nav:before{{display:none}}.nav a{{flex:0 0 auto}}}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}.shell{{padding:10px}}}}
-</style></head><body>{logout_html}<header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body>{logout_html}<header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'>{nav_html}<main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
@@ -5245,25 +5287,29 @@ def _lead_map_embed(surveys, verifications, map_id="lead-dashboard-map"):
     <script>(function(){{const el=document.getElementById('{map_id}'),st=document.getElementById('{map_id}-status');const data=JSON.parse(document.getElementById('{map_id}-data').textContent||'[]');if(!window.L){{st.textContent='Peta gagal dimuat. Periksa koneksi internet browser.';return;}}const map=L.map(el).setView([0.5,101.4],8);L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);const bounds=[];const safe=v=>String(v===null||v===undefined||v===''?'-':v).replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));data.forEach(x=>{{const survey=x.kind==='survey';const m=L.circleMarker([x.lat,x.lon],{{radius:8,color:survey?'#8f1825':'#9a6b12',weight:2,fillColor:survey?'#d94a55':'#e5b94f',fillOpacity:.9}}).addTo(map);const acc=x.accuracy===null||x.accuracy===undefined?'-':safe(x.accuracy)+' m';m.bindPopup(`<b>${{survey?'SURVEI DPSS':'VERIFIKASI DPS'}}</b><br>ID: ${{safe(x.survey_id)}}<br>Pemohon: ${{safe(x.applicant)}}<br>Usaha: ${{safe(x.business)}}<br>Desa: ${{safe(x.village)}}<br>Petugas: ${{safe(x.officer)}}<br>Waktu: ${{safe(x.date)}}<br>Koordinat: ${{x.lat.toFixed(6)}}, ${{x.lon.toFixed(6)}}<br>Akurasi: ${{acc}}${{x.decision?'<br>Keputusan: '+safe(x.decision):''}}`);bounds.push([x.lat,x.lon]);}});if(bounds.length){{map.fitBounds(bounds,{{padding:[28,28],maxZoom:15}});st.textContent=data.length+' titik GPS ditampilkan. Klik penanda untuk detail.';}}else{{st.textContent='Belum ada data koordinat GPS yang dapat dipetakan.';}}setTimeout(()=>map.invalidateSize(),180);}})();</script>"""
 
 @app.get("/pimpinan", response_class=HTMLResponse)
-def pimpinan_dashboard(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+def pimpinan_dashboard(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
     filters = _lead_filters(request)
-    surveys = _lead_survey_rows(filters)
-    verifications = _lead_verification_rows(filters)
+    surveys = _lead_survey_rows(filters, account)
+    verifications = _lead_verification_rows(filters, account)
     pending = max(0, len(surveys) - len(verifications))
     content = f"""<section class='metrics'><div class='metric'><span>Total survei DPSS</span><strong>{len(surveys)}</strong></div><div class='metric'><span>Sudah diverifikasi DPS</span><strong>{len(verifications)}</strong></div><div class='metric'><span>Menunggu verifikasi</span><strong>{pending}</strong></div><div class='metric'><span>Wilayah dalam hasil filter</span><strong>{len(set(str(r.get('village') or '') for r in surveys if r.get('village')))}</strong></div></section>
 {_lead_map_embed(surveys, verifications)}
 <section class='cards'><article class='report-card'><h2>📋 Laporan Survei DPSS</h2><p>Data awal pemohon dan usaha yang dikirim petugas desa. Foto usaha dan video survei ditampilkan pada halaman ini. Data identitas pribadi tidak dimasukkan ke laporan ekspor.</p><a class='btn' href='/pimpinan/survei'>Buka Laporan Survei</a></article><article class='report-card'><h2>🔎 Laporan Verifikasi DPS</h2><p>Hasil pemeriksaan DPS, keputusan, catatan verifikasi, rincian kebutuhan, serta media verifikasi. Laporan ini terpisah dari data survei awal.</p><a class='btn' href='/pimpinan/verifikasi'>Buka Laporan Verifikasi</a></article></section>
 <section class='cards'><article class='report-card'><h2>👥 Data Anggota DPS dan DPSS</h2><p>Daftar anggota terverifikasi beserta identitas dan dokumen keanggotaannya. Pengaturan akses aplikasi dilakukan melalui menu Kelola Akses.</p><a class='btn' href='/pimpinan/personel'>Lihat Data Anggota</a></article><article class='report-card'><h2>🗂️ Pendataan Identitas Petugas</h2><p>Identitas anggota bersumber dari pendaftaran mandiri yang telah diverifikasi. Pengaturan akun hanya untuk memberikan atau mencabut akses aplikasi.</p><a class='btn' href='/admin/kelola-akun'>Kelola Akses Aplikasi</a></article></section>
 <section class='panel'><h2>Catatan akses</h2><p class='muted'>Dashboard ini hanya menampilkan rekap. Fungsi input dan pengiriman dari aplikasi HP tidak diubah. Ekspor laporan survei dan verifikasi tersedia masing-masing pada halaman laporan.</p></section>"""
-    return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content))
+    if account:
+        content = _survey_admin_scope_banner(account, "Dashboard Ringkasan Data Survei dan Verifikasi") + content
+    return HTMLResponse(_lead_page("Dashboard Pimpinan", username, content, survey_admin=bool(account)))
 
 
 
 @app.get("/pimpinan/peta", response_class=HTMLResponse)
-def pimpinan_peta_gps(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+def pimpinan_peta_gps(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
     filters = _lead_filters(request)
-    surveys = _lead_survey_rows(filters)
-    verifications = _lead_verification_rows(filters)
+    surveys = _lead_survey_rows(filters, account)
+    verifications = _lead_verification_rows(filters, account)
     markers = []
     villages = sorted({str(r.get("village") or "").strip() for r in surveys if str(r.get("village") or "").strip()}, key=str.casefold)
     for row in surveys:
@@ -5335,7 +5381,9 @@ def pimpinan_peta_gps(request: Request, username: str = Depends(verify_pimpinan_
       setTimeout(()=>map.invalidateSize(),150);
     }})();
     </script>"""
-    return HTMLResponse(_lead_page("Peta Lokasi GPS", username, content))
+    if account:
+        content = _survey_admin_scope_banner(account, "Dashboard Peta Lokasi GPS") + content
+    return HTMLResponse(_lead_page("Peta Lokasi GPS", username, content, survey_admin=bool(account)))
 
 def _lead_filters_form(filters, base, export_prefix):
     qs = _lead_qs(filters)
@@ -5510,23 +5558,29 @@ def _lead_report_html(rows, media_map, verification=False):
 
 
 @app.get("/pimpinan/survei", response_class=HTMLResponse)
-def pimpinan_laporan_survei(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+def pimpinan_laporan_survei(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
     filters = _lead_filters(request)
-    rows = _lead_survey_rows(filters)
+    rows = _lead_survey_rows(filters, account)
     # Halaman dashboard survei menampilkan KTP bersama foto/video survei.
     # Endpoint ekspor tidak memanggil include_identity=True, sehingga KTP tetap privat.
     media = _lead_media([r["survey_id"] for r in rows], verification=False, include_identity=True)
     content = _lead_filters_form(filters, "/pimpinan/survei", "/pimpinan/survei/export") + _lead_report_html(rows, media, False)
-    return HTMLResponse(_lead_page("Laporan Survei DPSS", username, content))
+    if account:
+        content = _survey_admin_scope_banner(account, "Dashboard Laporan Survei DPSS") + content
+    return HTMLResponse(_lead_page("Laporan Survei DPSS", username, content, survey_admin=bool(account)))
 
 
 @app.get("/pimpinan/verifikasi", response_class=HTMLResponse)
-def pimpinan_laporan_verifikasi(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
+def pimpinan_laporan_verifikasi(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
     filters = _lead_filters(request)
-    rows = _lead_verification_rows(filters)
+    rows = _lead_verification_rows(filters, account)
     media = _lead_media([r["survey_id"] for r in rows], verification=True)
     content = _lead_filters_form(filters, "/pimpinan/verifikasi", "/pimpinan/verifikasi/export") + _lead_report_html(rows, media, True)
-    return HTMLResponse(_lead_page("Laporan Verifikasi DPS", username, content))
+    if account:
+        content = _survey_admin_scope_banner(account, "Dashboard Laporan Verifikasi DPS") + content
+    return HTMLResponse(_lead_page("Laporan Verifikasi DPS", username, content, survey_admin=bool(account)))
 
 
 def _lead_export_excel(rows, verification, filename, sheet_title):
@@ -5585,20 +5639,24 @@ def _lead_export_pdf(rows, verification, filename, title):
 
 
 @app.get("/pimpinan/survei/export/excel")
-def pimpinan_survei_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
-    return _lead_export_excel(_lead_survey_rows(_lead_filters(request)),False,"laporan_survei_dpss.xlsx","Survei DPSS")
+def pimpinan_survei_excel(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
+    return _lead_export_excel(_lead_survey_rows(_lead_filters(request), account),False,"laporan_survei_dpss.xlsx","Survei DPSS")
 
 @app.get("/pimpinan/survei/export/pdf")
-def pimpinan_survei_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
-    return _lead_export_pdf(_lead_survey_rows(_lead_filters(request)),False,"laporan_survei_dpss.pdf","Laporan Survei DPSS")
+def pimpinan_survei_pdf(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
+    return _lead_export_pdf(_lead_survey_rows(_lead_filters(request), account),False,"laporan_survei_dpss.pdf","Laporan Survei DPSS")
 
 @app.get("/pimpinan/verifikasi/export/excel")
-def pimpinan_verifikasi_excel(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
-    return _lead_export_excel(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.xlsx","Verifikasi DPS")
+def pimpinan_verifikasi_excel(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
+    return _lead_export_excel(_lead_verification_rows(_lead_filters(request), account),True,"laporan_verifikasi_dps.xlsx","Verifikasi DPS")
 
 @app.get("/pimpinan/verifikasi/export/pdf")
-def pimpinan_verifikasi_pdf(request: Request, username: str = Depends(verify_pimpinan_or_admin)):
-    return _lead_export_pdf(_lead_verification_rows(_lead_filters(request)),True,"laporan_verifikasi_dps.pdf","Laporan Verifikasi DPS")
+def pimpinan_verifikasi_pdf(request: Request, auth=Depends(verify_lead_or_survey_admin)):
+    username, account = auth
+    return _lead_export_pdf(_lead_verification_rows(_lead_filters(request), account),True,"laporan_verifikasi_dps.pdf","Laporan Verifikasi DPS")
 
 # =========================================================
 # MENJALANKAN SERVER SECARA LOKAL
