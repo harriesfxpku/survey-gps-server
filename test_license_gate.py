@@ -160,9 +160,15 @@ class AllowlistTests(unittest.TestCase):
                      ("POST", "/admin/akun-petugas/12/nonaktifkan")]:
             self.assertTrue(is_mutation_allowed_when_restricted(m, p), p)
 
+    def test_simpati_555_m2m_sync_allowed(self):
+        # 555 (otoritas lisensi) sudah menggerbang aksi ini sendiri; lihat simpati_license_gate.py.
+        for p in ("/api/integrasi/simpati/admin-survei", "/api/integrasi/simpati/admin-survei/",
+                  "/api/integrasi/simpati/anggota"):
+            self.assertTrue(is_mutation_allowed_when_restricted("POST", p), p)
+        self.assertFalse(is_mutation_allowed_when_restricted("POST", "/api/integrasi/simpati/lainnya"))
+
     def test_data_mutations_blocked(self):
         for m, p in [("POST", "/surveys"), ("POST", "/surveys/9/media"), ("DELETE", "/admin/surveys/3"),
-                     ("POST", "/api/integrasi/simpati/anggota"), ("POST", "/api/integrasi/simpati/admin-survei"),
                      ("POST", "/dps/surveys/1/verification"), ("POST", "/surveys/../auth/login/x")]:
             self.assertFalse(is_mutation_allowed_when_restricted(m, p), p)
 
