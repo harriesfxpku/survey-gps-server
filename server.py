@@ -3401,20 +3401,13 @@ def _survey_admin_scope_banner(account, page_label):
     level = {"DPD": "tingkat Provinsi (DPD)", "DPC": "tingkat Kabupaten/Kota (DPC)",
              "DPS": "tingkat Kecamatan (DPS)", "DPSS": "tingkat Desa/Kelurahan (DPSS)"}.get(role, role)
     return (
-        "<div style='display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin:12px 0 18px'>"
-        "<div role='note' style='flex:1 1 360px;min-width:0;background:#fff6dc;border:1px solid #e0ad35;border-left:6px solid #b87a16;"
-        "border-radius:10px;padding:14px 16px;color:#3b2a0e;line-height:1.55'>"
+        "<div role='note' style='background:#fff6dc;border:1px solid #e0ad35;border-left:6px solid #b87a16;"
+        "border-radius:10px;padding:14px 16px;margin:12px 0 18px;color:#3b2a0e;line-height:1.55'>"
         "<div style='font-weight:800;font-size:15px;color:#5b1018'>ℹ️ " + escape(page_label) + " — " + escape(region) + "</div>"
         "<div style='margin-top:6px;font-size:13.5px'>Anda masuk sebagai <b>Admin Survei " + escape(level) + "</b> dengan akun <b>"
         + escape(str(account.get("username") or "-")) + "</b>. Dashboard ini sesuai dengan akun yang dibuat oleh Superadmin SIMPATI 555 "
         "berdasarkan wilayahnya, sehingga seluruh data, peta, dan daftar petugas hanya menampilkan cakupan "
         "<b>" + escape(region) + "</b>.</div></div>"
-        # Tombol keluar: hapus sesi Admin Survei lalu kembali ke halaman login Admin Survei.
-        "<form method='post' action='/admin-survei/logout' style='margin:0;flex:0 0 auto'>"
-        "<button type='submit' title='Keluar dari akun Admin Survei' "
-        "style='background:linear-gradient(110deg,#b3202f,#7d1020);color:#fff;border:1px solid #e0ad35;"
-        "border-radius:9px;padding:12px 20px;font-weight:800;cursor:pointer;white-space:nowrap'>"
-        "⎋ Keluar</button></form></div>"
     )
 
 
@@ -3511,7 +3504,7 @@ def survey_admin_personel(account=Depends(require_survey_admin)):
       <p class='muted'>Identitas, jabatan, status, dan penugasan hanya dapat diubah melalui SIMPATI 555.</p>
       <a class='btn back' href='/admin/dashboard'>← Kembali ke Dashboard</a>
     </section>"""
-    return HTMLResponse(_lead_page("Data Anggota Petugas Survei", account["username"], content))
+    return HTMLResponse(_lead_page("Data Anggota Petugas Survei", account["username"], content, survey_admin=True))
 
 
 @app.get("/admin/dashboard", response_class=HTMLResponse)
@@ -3545,7 +3538,7 @@ def admin_main_dashboard(request: Request, account=Depends(require_survey_admin)
     stat=lambda k:int((stats or {}).get(k) or 0)
     rows="".join(f"<tr><td>{escape(str(r.get('applicant_name') or '-'))}</td><td>{escape(str(r.get('business_name') or '-'))}</td><td>{escape(str(r.get('village') or '-'))}</td><td>{escape(str(r.get('officer_name') or '-'))}</td><td>{escape(str(r.get('surveyed_at') or '-'))}</td></tr>" for r in recent)
     content=f"""<section class='panel'><h2 style='margin-top:0;color:#5b1018'>{escape(title)}</h2>{_survey_admin_scope_banner(account,'Dashboard Data Survei dan Verifikasi')}<div class='stats'><div class='stat'><b>{stat('surveys_total')}</b><span>Total survei</span></div><div class='stat'><b>{stat('pending_total')}</b><span>Menunggu verifikasi DPS</span></div><div class='stat'><b>{stat('verified_total')}</b><span>Sudah diverifikasi</span></div><div class='stat'><b>{stat('gps_total')}</b><span>Memiliki titik GPS</span></div></div><div style='display:flex;gap:10px;flex-wrap:wrap;margin:18px 0'><a class='btn gold' href='/admin/peta-gps'>📍 Peta GPS Data Hasil Survei</a><a class='btn gold' href='/pimpinan/personel'>👥 Data Anggota Petugas</a></div></section><section class='panel'><h2>Survei terbaru dalam wilayah</h2><div class='lead-report-tablewrap'><table class='lead-report-table'><thead><tr><th>Nama yang disurvei</th><th>Usaha</th><th>Desa</th><th>Petugas DPSS</th><th>Waktu</th></tr></thead><tbody>{rows or '<tr><td colspan="5">Belum ada data survei pada cakupan wilayah ini.</td></tr>'}</tbody></table></div></section><section class='panel'><h2>Keamanan akun</h2><form method='post' action='/admin-survei/password'><label>Password saat ini</label><input type='password' name='password_lama' required autocomplete='current-password'><label>Password baru (minimal 12 karakter)</label><input type='password' name='password_baru' required minlength='12' autocomplete='new-password'><label>Konfirmasi password baru</label><input type='password' name='konfirmasi_password' required minlength='12' autocomplete='new-password'><button type='submit'>Ganti Password</button></form><form method='post' action='/admin-survei/logout' style='margin-top:12px'><button type='submit'>Keluar</button></form></section>"""
-    return HTMLResponse(_lead_page(title,account["username"],content))
+    return HTMLResponse(_lead_page(title,account["username"],content,survey_admin=True))
 
 
 @app.get("/admin/peta-gps", response_class=HTMLResponse)
@@ -3579,7 +3572,7 @@ def admin_survey_gps_map(request: Request, account=Depends(require_survey_admin)
     opts="".join(f"<option value='{_lead_e(v)}' {'selected' if filters.get('wilayah')==v else ''}>{_lead_e(v)}</option>" for v in sorted(villages,key=str.casefold))
     region=", ".join(x for x in [account["scope_village"],account["scope_district"],account["scope_regency"],account["scope_province"]] if x)
     content=f"""<section class='panel'><h2 style='color:#5b1018'>Peta GPS Data Hasil Survei</h2>{_survey_admin_scope_banner(account,'Dashboard Peta GPS Data Hasil Survei')}<p class='muted'>Setiap titik menampilkan nama orang yang disurvei, informasi usaha, alamat, petugas DPSS, waktu, dan akurasi GPS.</p><form method='get' action='/admin/peta-gps' class='filters'><div><label>TANGGAL MULAI</label><input type='date' name='tanggal_mulai' value='{_lead_e(filters.get('tanggal_mulai'))}'></div><div><label>TANGGAL SELESAI</label><input type='date' name='tanggal_selesai' value='{_lead_e(filters.get('tanggal_selesai'))}'></div><div><label>DESA</label><select name='wilayah'><option value=''>Semua desa dalam cakupan</option>{opts}</select></div><div><label>PETUGAS DPSS</label><input name='petugas' value='{_lead_e(filters.get('petugas'))}' placeholder='ID atau nama petugas'></div><div class='actions' style='grid-column:1/-1'><button type='submit'>Terapkan Filter</button><a class='btn light' href='/admin/peta-gps'>Reset</a><a class='btn light' href='/admin/dashboard'>Dashboard</a></div></form><p><b>{len(markers)} titik GPS survei</b></p><div id='admin-gps-map' style='height:560px;min-height:360px;border-radius:12px'></div><p id='admin-map-status' class='muted'>Memuat peta…</p></section><script type='application/json' id='admin-map-data'>{data}</script><link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'><script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script><script>(function(){{const el=document.getElementById('admin-gps-map'),st=document.getElementById('admin-map-status'),data=JSON.parse(document.getElementById('admin-map-data').textContent||'[]');if(!window.L){{st.textContent='Peta gagal dimuat. Periksa koneksi internet.';return}}const map=L.map(el).setView([0.5,101.4],8);L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);const safe=v=>String(v??'-').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));const bounds=[];data.forEach(x=>{{const m=L.circleMarker([x.lat,x.lon],{{radius:8,color:'#8f1825',fillColor:'#d94a55',fillOpacity:.9,weight:2}}).addTo(map);m.bindPopup(`<b>DATA SURVEI #${{safe(x.survey_id)}}</b><br>Nama yang disurvei: <b>${{safe(x.applicant)}}</b><br>Usaha: ${{safe(x.business)}}<br>Alamat: ${{safe(x.address)}}<br>Desa: ${{safe(x.village)}}<br>Petugas DPSS: ${{safe(x.officer)}}<br>Waktu survei: ${{safe(x.date)}}<br>Koordinat: ${{x.lat.toFixed(6)}}, ${{x.lon.toFixed(6)}}<br>Akurasi GPS: ${{safe(x.accuracy)}} m`);bounds.push([x.lat,x.lon])}});if(bounds.length){{map.fitBounds(bounds,{{padding:[30,30],maxZoom:15}});st.textContent=`${{data.length}} titik GPS ditampilkan.`}}else st.textContent='Belum ada titik GPS pada filter dan cakupan ini.';setTimeout(()=>map.invalidateSize(),150)}})();</script>"""
-    return HTMLResponse(_lead_page("Peta GPS Hasil Survei",account["username"],content))
+    return HTMLResponse(_lead_page("Peta GPS Hasil Survei",account["username"],content,survey_admin=True))
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -4295,7 +4288,18 @@ def _lead_qs(filters):
     return urlencode({k: v for k, v in filters.items() if v})
 
 
-def _lead_page(title, username, content):
+def _lead_page(title, username, content, survey_admin=False):
+    # Halaman Admin Survei: tombol Keluar tetap (fixed) di kanan atas layar, selalu terlihat saat scroll.
+    logout_html = (
+        "<style>header{padding-right:150px!important}@media(max-width:520px){header{padding-right:110px!important}}"
+        "#survey-admin-logout{position:fixed;top:14px;right:18px;z-index:99999;margin:0}"
+        "#survey-admin-logout button{background:linear-gradient(110deg,#c4263a,#7d1020);color:#fff;"
+        "border:2px solid #e0ad35;border-radius:10px;padding:10px 18px;font:inherit;font-weight:800;"
+        "cursor:pointer;white-space:nowrap;box-shadow:0 6px 18px #0009}"
+        "#survey-admin-logout button:hover{filter:brightness(1.15)}</style>"
+        "<form id='survey-admin-logout' method='post' action='/admin-survei/logout'>"
+        "<button type='submit' title='Keluar dari akun Admin Survei dan kembali ke halaman login'>⎋ Keluar</button></form>"
+    ) if survey_admin else ""
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{_lead_e(title)} | Ikatan Persaudaraan Triple 555</title><style>
 :root{{--maroon:#650b18;--deep:#17070b;--gold:#e0ad35;--paper:#f4f0eb;--ink:#f7eee5;--line:#503337;--muted:#b8a8a0}}
@@ -4325,7 +4329,7 @@ main{{min-width:0;padding:0}}.panel,.metric{{background:linear-gradient(145deg,#
 .cards{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.report-card{{background:linear-gradient(145deg,#26191b,#1c1114);border:1px solid #5b3939;border-top:3px solid var(--gold);border-radius:14px;padding:20px}}.report-card h2{{margin:0 0 8px;color:#f1cb72}}
 .people-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}}.person-card{{display:flex;gap:14px;align-items:center;background:#211518;border:1px solid #5b3939;border-left:4px solid var(--gold);border-radius:13px;padding:14px}}.person-photo{{width:82px;height:82px;flex:0 0 82px;border-radius:12px;object-fit:cover;background:#302225}}.no-photo{{display:flex;align-items:center;justify-content:center;text-align:center;color:#b8a8a0;font-size:11px}}.person-info h3{{margin:0 0 3px;color:#f1cb72}}.person-info p{{margin:6px 0}}.status{{display:inline-block;padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800}}.status.active{{background:#174d32;color:#a7efbf}}.status.inactive{{background:#604316;color:#ffdf8a}}footer{{text-align:center;color:#988780;font-size:12px;padding:20px}}
 @media(max-width:900px){{.shell{{grid-template-columns:1fr;padding:14px}}.nav{{min-height:0;flex-direction:row;overflow-x:auto;white-space:nowrap}}.nav:before{{display:none}}.nav a{{flex:0 0 auto}}}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.filters{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{.cards,.filters{{grid-template-columns:1fr}}header{{padding:18px 16px}}.shell{{padding:10px}}}}
-</style></head><body><header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
+</style></head><body>{logout_html}<header><div class='brand'><img src='/logo.png' alt='Logo Triple 555'><div><h1>555 · EXECUTIVE COMMAND CENTER</h1><p>Ikatan Persaudaraan Triple 555 · Sistem Survei Bantuan UMKM</p><div class='user'>Masuk sebagai: {_lead_e(username)} · Pimpinan/Admin</div></div></div></header><main><div class='shell'><nav class='nav'><a class='btn light' href='/pimpinan'>▦ &nbsp; Ringkasan</a><a class='btn light' href='/pimpinan/survei'>▤ &nbsp; Laporan Survei DPSS</a><a class='btn light' href='/pimpinan/verifikasi'>✓ &nbsp; Laporan Verifikasi DPS</a><a class='btn light' href='/pimpinan/peta'>⌖ &nbsp; Peta Lokasi GPS</a><a class='btn light' href='/pimpinan/personel'>♙ &nbsp; Data Anggota</a><a class='btn light' href='/admin/kelola-akun'>⚿ &nbsp; Kelola Akses</a></nav><main>{content}</main></div><footer>© 2026 Ikatan Persaudaraan Triple 555 · Data digunakan sesuai kewenangan organisasi.</footer></body></html>"""
 
 
 
