@@ -44,6 +44,12 @@ ALLOWED_PATTERNS = [
     re.compile(r"^/admin/akun-petugas/[^/]+/nonaktifkan$"),
     re.compile(r"^/admin/officers/[^/]+/deactivate$"),
     re.compile(r"^/admin/kelola-akun/[^/]+/nonaktifkan$"),
+    # Sinkronisasi M2M DARI SIMPATI 555 (dilindungi X-SIMPATI-Token). 555 adalah otoritas lisensi
+    # dan sudah menolak sendiri aksi ini (require_license_account_modification / require_license_write
+    # / modul SURVEI_GPS) sebelum memanggil Survei. Tanpa pengecualian ini, reset password / buat akun
+    # Admin Survei dari dashboard Superadmin 555 gagal 403 bila env SIMPATI_API_URL belum terisi.
+    re.compile(r"^/api/integrasi/simpati/admin-survei$"),
+    re.compile(r"^/api/integrasi/simpati/anggota$"),
 ]
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
