@@ -3401,13 +3401,20 @@ def _survey_admin_scope_banner(account, page_label):
     level = {"DPD": "tingkat Provinsi (DPD)", "DPC": "tingkat Kabupaten/Kota (DPC)",
              "DPS": "tingkat Kecamatan (DPS)", "DPSS": "tingkat Desa/Kelurahan (DPSS)"}.get(role, role)
     return (
-        "<div role='note' style='background:#fff6dc;border:1px solid #e0ad35;border-left:6px solid #b87a16;"
-        "border-radius:10px;padding:14px 16px;margin:12px 0 18px;color:#3b2a0e;line-height:1.55'>"
+        "<div style='display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin:12px 0 18px'>"
+        "<div role='note' style='flex:1 1 360px;min-width:0;background:#fff6dc;border:1px solid #e0ad35;border-left:6px solid #b87a16;"
+        "border-radius:10px;padding:14px 16px;color:#3b2a0e;line-height:1.55'>"
         "<div style='font-weight:800;font-size:15px;color:#5b1018'>ℹ️ " + escape(page_label) + " — " + escape(region) + "</div>"
         "<div style='margin-top:6px;font-size:13.5px'>Anda masuk sebagai <b>Admin Survei " + escape(level) + "</b> dengan akun <b>"
         + escape(str(account.get("username") or "-")) + "</b>. Dashboard ini sesuai dengan akun yang dibuat oleh Superadmin SIMPATI 555 "
         "berdasarkan wilayahnya, sehingga seluruh data, peta, dan daftar petugas hanya menampilkan cakupan "
         "<b>" + escape(region) + "</b>.</div></div>"
+        # Tombol keluar: hapus sesi Admin Survei lalu kembali ke halaman login Admin Survei.
+        "<form method='post' action='/admin-survei/logout' style='margin:0;flex:0 0 auto'>"
+        "<button type='submit' title='Keluar dari akun Admin Survei' "
+        "style='background:linear-gradient(110deg,#b3202f,#7d1020);color:#fff;border:1px solid #e0ad35;"
+        "border-radius:9px;padding:12px 20px;font-weight:800;cursor:pointer;white-space:nowrap'>"
+        "⎋ Keluar</button></form></div>"
     )
 
 
