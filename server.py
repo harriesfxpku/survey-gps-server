@@ -5,6 +5,7 @@ import secrets
 import hashlib
 import hmac
 import base64
+import logging
 import re
 import unicodedata
 from fastapi import UploadFile, File, Form, Cookie
@@ -3375,6 +3376,54 @@ def survey_admin_logout(survey_admin_session: str | None = Cookie(default=None))
     return response
 
 
+# Tombol Keluar Admin Survei: tetap (fixed) di kanan atas layar, dipasang di SETIAP halaman HTML
+# selama sesi Admin Survei aktif (lihat middleware di bawah), lalu kembali ke halaman login Admin Survei.
+SURVEY_ADMIN_LOGOUT_HTML = (
+    "<style>header{padding-right:150px!important}@media(max-width:520px){header{padding-right:110px!important}}"
+    "#survey-admin-logout{position:fixed;top:14px;right:18px;z-index:99999;margin:0}"
+    "#survey-admin-logout button{background:linear-gradient(110deg,#c4263a,#7d1020);color:#fff;"
+    "border:2px solid #e0ad35;border-radius:10px;padding:10px 18px;font:inherit;font-weight:800;"
+    "cursor:pointer;white-space:nowrap;box-shadow:0 6px 18px #0009}"
+    "#survey-admin-logout button:hover{filter:brightness(1.15)}</style>"
+    "<form id='survey-admin-logout' method='post' action='/admin-survei/logout'>"
+    "<button type='submit' title='Keluar dari akun Admin Survei dan kembali ke halaman login'>⎋ Keluar</button></form>"
+)
+_BODY_OPEN_RE = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
+
+
+def inject_survey_admin_logout(html_text: str) -> str:
+    """Sisipkan tombol Keluar tepat setelah <body> (idempoten; tidak menggandakan)."""
+    if "id='survey-admin-logout'" in html_text:
+        return html_text
+    m = _BODY_OPEN_RE.search(html_text)
+    if not m:
+        return html_text
+    return html_text[:m.end()] + SURVEY_ADMIN_LOGOUT_HTML + html_text[m.end():]
+
+
+@app.middleware("http")
+async def survey_admin_logout_button(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        token = request.cookies.get("survey_admin_session")
+        path = request.url.path
+        if (not token or request.method != "GET" or response.status_code != 200
+                or path.startswith("/admin-survei/login")
+                or "text/html" not in response.headers.get("content-type", "").lower()):
+            return response
+        if not await _run_in_threadpool(_survey_admin_identity, token):
+            return response
+        raw = b"".join([chunk async for chunk in response.body_iterator])
+        new_body = inject_survey_admin_logout(raw.decode("utf-8")).encode("utf-8")
+        headers = {k: v for k, v in response.headers.items()
+                   if k.lower() not in ("content-length", "transfer-encoding", "content-encoding")}
+        return Response(content=new_body, status_code=response.status_code, headers=headers,
+                        media_type=None, background=getattr(response, "background", None))
+    except Exception:
+        logging.getLogger("survey_admin_logout").exception("Gagal menyisipkan tombol keluar Admin Survei")
+        return response
+
+
 def _survey_admin_scope_sql(account, alias="s"):
     role=account["role"]
     clauses=["(o.member_id="+alias+".member_id OR o.login_id="+alias+".member_id)"]
@@ -4290,16 +4339,7 @@ def _lead_qs(filters):
 
 def _lead_page(title, username, content, survey_admin=False):
     # Halaman Admin Survei: tombol Keluar tetap (fixed) di kanan atas layar, selalu terlihat saat scroll.
-    logout_html = (
-        "<style>header{padding-right:150px!important}@media(max-width:520px){header{padding-right:110px!important}}"
-        "#survey-admin-logout{position:fixed;top:14px;right:18px;z-index:99999;margin:0}"
-        "#survey-admin-logout button{background:linear-gradient(110deg,#c4263a,#7d1020);color:#fff;"
-        "border:2px solid #e0ad35;border-radius:10px;padding:10px 18px;font:inherit;font-weight:800;"
-        "cursor:pointer;white-space:nowrap;box-shadow:0 6px 18px #0009}"
-        "#survey-admin-logout button:hover{filter:brightness(1.15)}</style>"
-        "<form id='survey-admin-logout' method='post' action='/admin-survei/logout'>"
-        "<button type='submit' title='Keluar dari akun Admin Survei dan kembali ke halaman login'>⎋ Keluar</button></form>"
-    ) if survey_admin else ""
+    logout_html = SURVEY_ADMIN_LOGOUT_HTML if survey_admin else ""
     return f"""<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{_lead_e(title)} | Ikatan Persaudaraan Triple 555</title><style>
 :root{{--maroon:#650b18;--deep:#17070b;--gold:#e0ad35;--paper:#f4f0eb;--ink:#f7eee5;--line:#503337;--muted:#b8a8a0}}
